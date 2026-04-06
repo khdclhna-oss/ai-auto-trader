@@ -25,6 +25,7 @@ from typing import List, Optional
 
 # Add engine dir to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from charges import calculate_charges
 
 STOCKS = [
     # Financials
@@ -75,6 +76,7 @@ class BacktestResult:
     gross_profit: float
     gross_loss: float
     net_pnl: float
+    total_charges: float        # NEW: sum of all transaction costs
     profit_factor: float
     sharpe_ratio: float
     sortino_ratio: float
@@ -204,6 +206,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
     peak_equity = INITIAL_CAPITAL
     max_dd = 0.0
     daily_returns = []
+    total_charges_paid = 0.0   # running tally of all transaction costs
 
     # Fetch and prepare data for all stocks
     stock_data = {}
@@ -252,26 +255,32 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                 # Stop loss hit
                 if float(row["low"]) <= pos["sl"]:
                     exit_price = pos["sl"]
-                    pnl = (exit_price - pos["entry"]) * pos["qty"]
+                    c = calculate_charges(pos["entry"], exit_price, pos["qty"], is_intraday=True)
+                    pnl = c.net_pnl
                     all_trades.append(BacktestTrade(
                         symbol, "SELL", pos["entry"], exit_price, pos["qty"],
-                        pnl, pos["entry_time"], date, "Stop loss hit",
+                        pnl, pos["entry_time"], date,
+                        f"Stop loss hit | charges ₹{c.total:.2f}",
                         hold_bars=i - pos["entry_idx"]
                     ))
-                    cash += exit_price * pos["qty"]
+                    cash += exit_price * pos["qty"] - c.total
+                    total_charges_paid += c.total
                     del positions[symbol]
                     continue
 
                 # Target hit
                 if float(row["high"]) >= pos["target"]:
                     exit_price = pos["target"]
-                    pnl = (exit_price - pos["entry"]) * pos["qty"]
+                    c = calculate_charges(pos["entry"], exit_price, pos["qty"], is_intraday=True)
+                    pnl = c.net_pnl
                     all_trades.append(BacktestTrade(
                         symbol, "SELL", pos["entry"], exit_price, pos["qty"],
-                        pnl, pos["entry_time"], date, "Target hit",
+                        pnl, pos["entry_time"], date,
+                        f"Target hit | charges ₹{c.total:.2f}",
                         hold_bars=i - pos["entry_idx"]
                     ))
-                    cash += exit_price * pos["qty"]
+                    cash += exit_price * pos["qty"] - c.total
+                    total_charges_paid += c.total
                     del positions[symbol]
                     continue
 
@@ -300,13 +309,16 @@ def run_backtest(period: str = "2y") -> BacktestResult:
 
             elif action == "SELL" and symbol in positions:
                 pos = positions[symbol]
-                pnl = (price - pos["entry"]) * pos["qty"]
+                c = calculate_charges(pos["entry"], price, pos["qty"], is_intraday=True)
+                pnl = c.net_pnl
                 all_trades.append(BacktestTrade(
                     symbol, "SELL", pos["entry"], price, pos["qty"],
-                    pnl, pos["entry_time"], date, "Signal sell",
+                    pnl, pos["entry_time"], date,
+                    f"Signal sell | charges ₹{c.total:.2f}",
                     hold_bars=i - pos["entry_idx"]
                 ))
-                cash += price * pos["qty"]
+                cash += price * pos["qty"] - c.total
+                total_charges_paid += c.total
                 del positions[symbol]
 
         # Calculate daily equity
@@ -334,10 +346,13 @@ def run_backtest(period: str = "2y") -> BacktestResult:
     for symbol, pos in list(positions.items()):
         if last_date in stock_data[symbol].index:
             price = float(stock_data[symbol].loc[last_date]["close"])
-            pnl = (price - pos["entry"]) * pos["qty"]
+            c = calculate_charges(pos["entry"], price, pos["qty"], is_intraday=True)
+            pnl = c.net_pnl
+            total_charges_paid += c.total
             all_trades.append(BacktestTrade(
                 symbol, "SELL", pos["entry"], price, pos["qty"],
-                pnl, pos["entry_time"], last_date, "End of backtest",
+                pnl, pos["entry_time"], last_date,
+                f"End of backtest | charges ₹{c.total:.2f}",
                 hold_bars=len(sorted_dates) - pos["entry_idx"]
             ))
 
@@ -370,7 +385,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
         sharpe, sortino = 0, 0
 
     result = BacktestResult(
-        strategy_name="V2_MultiTF_Confluence",
+        strategy_name="V2.1_MultiTF_Confluence",
         period_start=sorted_dates[0].strftime("%Y-%m-%d"),
         period_end=sorted_dates[-1].strftime("%Y-%m-%d"),
         total_trades=total,
@@ -380,6 +395,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
         gross_profit=round(gross_profit, 2),
         gross_loss=round(gross_loss, 2),
         net_pnl=round(net_pnl, 2),
+        total_charges=round(total_charges_paid, 2),
         profit_factor=round(profit_factor, 2),
         sharpe_ratio=round(sharpe, 3),
         sortino_ratio=round(sortino, 3),
@@ -394,12 +410,14 @@ def run_backtest(period: str = "2y") -> BacktestResult:
 
     # ─── Print report ─────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  BACKTEST RESULTS")
+    print(f"  BACKTEST RESULTS (with real transaction charges)")
     print(f"{'='*60}")
     print(f"  Period:          {result.period_start} → {result.period_end}")
     print(f"  Total Trades:    {total}")
     print(f"  Win Rate:        {win_rate:.1f}% ({len(wins)}W / {len(losses)}L)")
     print(f"  Net P&L:         ₹{net_pnl:+,.2f} ({net_pnl/INITIAL_CAPITAL*100:+.2f}%)")
+    print(f"  Total Charges:   ₹{total_charges_paid:,.2f} ({total_charges_paid/INITIAL_CAPITAL*100:.3f}% of capital)")
+    print(f"  Charges/Trade:   ₹{total_charges_paid/total:.2f} avg" if total else "")
     print(f"  Profit Factor:   {profit_factor:.2f}")
     print(f"  Avg Win:         ₹{avg_win:,.2f}")
     print(f"  Avg Loss:        ₹{avg_loss:,.2f}")

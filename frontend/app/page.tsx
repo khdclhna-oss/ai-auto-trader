@@ -9,7 +9,8 @@ import {
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity, Clock, LayoutDashboard, LineChart,
-  TrendingUp, TrendingDown, BarChart2, Target, AlertTriangle, Zap
+  TrendingUp, TrendingDown, BarChart2, Target, AlertTriangle, Zap,
+  Shield, CheckCircle2, XCircle, MinusCircle, RefreshCw, ChevronDown, ChevronUp
 } from 'lucide-react'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Title, Tooltip, Legend)
@@ -26,6 +27,17 @@ type Analytics = {
   backtest: { sharpe_ratio: number; sortino_ratio: number; max_drawdown_pct: number; win_rate: number; profit_factor: number; total_pnl: number; total_trades: number; period_start: string; period_end: string } | null;
   signalDistribution: { action: string; count: number }[];
   regimeDistribution: { regime: string; count: number }[];
+}
+type RunLog = {
+  id: number; started_at: string; finished_at: string; status: string;
+  market_open: boolean; stocks_scanned: number; signals_fired: number;
+  trades_executed: number; error_message: string | null; duration_ms: number;
+  log_lines: string | null;
+}
+type SystemStatus = {
+  latest: RunLog | null; runs: RunLog[];
+  isMarketOpen: boolean; lastRunAgeMinutes: number | null;
+  consecutiveErrors: number; hasRecentError: boolean; systemHealthy: boolean;
 }
 
 const fetcher = (url: string) => fetch(url).then(res => res.json())
@@ -55,13 +67,15 @@ function MetricCard({ label, value, icon: Icon, good, bad }: { label: string; va
 }
 
 export default function Dashboard() {
-  const [tab, setTab] = useState<'dashboard'|'live'|'log'|'analytics'>('dashboard')
+  const [tab, setTab] = useState<'dashboard'|'live'|'log'|'analytics'|'status'>('dashboard')
+  const [expandedLog, setExpandedLog] = useState<number | null>(null)
 
   const { data: portfolio } = useSWR<Portfolio>('/api/portfolio', fetcher, { refreshInterval: 15000 })
   const { data: live } = useSWR<LiveTrade[]>('/api/trades/live', fetcher, { refreshInterval: 15000 })
   const { data: log } = useSWR<TradeLog[]>('/api/trades/log', fetcher, { refreshInterval: 15000 })
   const { data: equity } = useSWR<EquitySnap[]>('/api/equity', fetcher, { refreshInterval: 15000 })
   const { data: analytics } = useSWR<Analytics>('/api/analytics', fetcher, { refreshInterval: 60000 })
+  const { data: status } = useSWR<SystemStatus>('/api/status', fetcher, { refreshInterval: 30000 })
 
   const n = (v: string|number|undefined, d = 0) => Number(v ?? d)
 
@@ -117,6 +131,7 @@ export default function Dashboard() {
     { id: 'live', label: 'Live Positions', icon: LineChart },
     { id: 'log', label: 'Trade Log', icon: Clock },
     { id: 'analytics', label: 'Analytics', icon: BarChart2 },
+    { id: 'status', label: 'System Status', icon: Shield },
   ]
 
   return (
@@ -409,6 +424,121 @@ export default function Dashboard() {
                         })}
                       </div>
                     </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── SYSTEM STATUS TAB ── */}
+            {tab === 'status' && (
+              <div className="space-y-5">
+
+                {/* Health Banner */}
+                <div className={`rounded-2xl p-5 border flex items-center gap-4 ${
+                  !status ? 'bg-white/5 border-white/10' :
+                  status.systemHealthy ? 'bg-emerald-500/10 border-emerald-500/20' :
+                  'bg-red-500/10 border-red-500/30'
+                }`}>
+                  {!status ? (
+                    <RefreshCw className="w-6 h-6 text-slate-400 animate-spin" />
+                  ) : status.systemHealthy ? (
+                    <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+                  ) : (
+                    <XCircle className="w-6 h-6 text-red-400" />
+                  )}
+                  <div className="flex-1">
+                    <p className={`font-semibold ${
+                      !status ? 'text-slate-300' : status.systemHealthy ? 'text-emerald-300' : 'text-red-300'
+                    }`}>
+                      {!status ? 'Loading status...' : status.systemHealthy ? 'System Healthy' : 'System Needs Attention'}
+                    </p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {status?.isMarketOpen
+                        ? `🟢 NSE Market OPEN · Bot running every 15 min`
+                        : `🔴 NSE Market CLOSED (9:15 AM – 3:30 PM IST)`}
+                      {status?.lastRunAgeMinutes !== null && status?.lastRunAgeMinutes !== undefined &&
+                        ` · Last run ${status.lastRunAgeMinutes}m ago`
+                      }
+                    </p>
+                  </div>
+                  {status?.hasRecentError && (
+                    <span className="text-xs bg-red-500/20 text-red-400 border border-red-500/30 px-2 py-1 rounded-lg">
+                      ⚠️ Recent errors detected
+                    </span>
+                  )}
+                </div>
+
+                {/* Run History */}
+                <h2 className="font-semibold text-slate-200 flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-cyan-400" />
+                  Run History (last 20 executions)
+                </h2>
+
+                {!status || status.runs.length === 0 ? (
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-10 text-center text-slate-500">
+                    <Shield className="w-8 h-8 mx-auto mb-3 opacity-30" />
+                    <p>No run history yet</p>
+                    <p className="text-xs mt-1">Runs will appear here after the first GitHub Action execution</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {status.runs.map((run, i) => {
+                      const isExpanded = expandedLog === run.id
+                      const statusConfig = {
+                        'SUCCESS':      { icon: CheckCircle2, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: 'Success' },
+                        'MARKET_CLOSED': { icon: MinusCircle, color: 'text-slate-400', bg: 'bg-white/5 border-white/10', label: 'Market Closed' },
+                        'ERROR':        { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/20', label: 'Error' },
+                        'RUNNING':      { icon: RefreshCw, color: 'text-cyan-400', bg: 'bg-cyan-500/10 border-cyan-500/20', label: 'Running' },
+                      }[run.status] || { icon: MinusCircle, color: 'text-slate-400', bg: 'bg-white/5 border-white/10', label: run.status }
+                      const StatusIcon = statusConfig.icon
+                      return (
+                        <motion.div key={run.id} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.02 }}
+                          className={`rounded-xl border overflow-hidden ${statusConfig.bg}`}>
+                          <div
+                            className="p-4 flex items-center gap-3 cursor-pointer"
+                            onClick={() => setExpandedLog(isExpanded ? null : run.id)}
+                          >
+                            <StatusIcon className={`w-4 h-4 flex-shrink-0 ${statusConfig.color} ${run.status === 'RUNNING' ? 'animate-spin' : ''}`} />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className={`text-sm font-semibold ${statusConfig.color}`}>{statusConfig.label}</span>
+                                {run.trades_executed > 0 && (
+                                  <span className="text-xs bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 px-2 py-0.5 rounded-full">
+                                    {run.trades_executed} trade{run.trades_executed !== 1 ? 's' : ''} executed
+                                  </span>
+                                )}
+                                {run.signals_fired > 0 && (
+                                  <span className="text-xs text-slate-500">{run.signals_fired} signals</span>
+                                )}
+                                {run.stocks_scanned > 0 && (
+                                  <span className="text-xs text-slate-600">{run.stocks_scanned} stocks scanned</span>
+                                )}
+                              </div>
+                              <p className="text-xs text-slate-500 mt-0.5">
+                                {new Date(run.started_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                {run.duration_ms && ` · ${(run.duration_ms / 1000).toFixed(1)}s`}
+                              </p>
+                              {run.error_message && (
+                                <p className="text-xs text-red-400 mt-1 font-mono truncate">{run.error_message}</p>
+                              )}
+                            </div>
+                            {run.log_lines && (
+                              isExpanded
+                                ? <ChevronUp className="w-4 h-4 text-slate-500 flex-shrink-0" />
+                                : <ChevronDown className="w-4 h-4 text-slate-500 flex-shrink-0" />
+                            )}
+                          </div>
+                          {/* Expandable full log */}
+                          {isExpanded && run.log_lines && (
+                            <div className="border-t border-white/10 px-4 pb-4">
+                              <pre className="text-[11px] text-slate-400 font-mono whitespace-pre-wrap break-all bg-black/30 rounded-lg p-3 mt-3 max-h-80 overflow-y-auto">
+                                {run.log_lines}
+                              </pre>
+                            </div>
+                          )}
+                        </motion.div>
+                      )
+                    })}
                   </div>
                 )}
               </div>

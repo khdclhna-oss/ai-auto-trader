@@ -12,14 +12,33 @@ The main trading engine. Coordinates:
 
 import os
 import sys
+import io
+import time
+import traceback
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from multi_timeframe import fetch_multi_timeframe, get_confluence
 from regime import detect_regime
 from risk_manager import (
     calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS
 )
 from news import get_news_sentiment
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+class TeeLogger:
+    """Writes to both stdout and an in-memory buffer for log capture."""
+    def __init__(self):
+        self._buf = io.StringIO()
+        self._stdout = sys.stdout
+    def write(self, msg):
+        self._stdout.write(msg)
+        self._buf.write(msg)
+    def flush(self):
+        self._stdout.flush()
+    def getvalue(self):
+        return self._buf.getvalue()
 
 STOCKS = [
     # Financials
@@ -63,15 +82,57 @@ def is_market_open() -> bool:
 
 
 def run():
+    tee = TeeLogger()
+    sys.stdout = tee
+    start_ts = time.time()
+    run_id = None
+    log_conn = psycopg2.connect(DATABASE_URL)
+
+    try:
+        log_cur = log_conn.cursor()
+        log_cur.execute(
+            "INSERT INTO run_logs (started_at, status) VALUES (NOW(), 'RUNNING') RETURNING id"
+        )
+        run_id = log_cur.fetchone()[0]
+        log_conn.commit()
+        log_cur.close()
+    except Exception as e:
+        sys.stdout = tee._stdout
+        print(f"[run_logs] Could not create run record: {e}")
+        sys.stdout = tee
+
+    def finish_log(status, stocks_scanned=0, signals_fired=0, trades_executed=0, error_msg=None):
+        """Finalize the run_logs row."""
+        sys.stdout = tee._stdout  # restore before any potential errors here
+        if run_id is None:
+            return
+        try:
+            duration_ms = int((time.time() - start_ts) * 1000)
+            lc = log_conn.cursor()
+            lc.execute("""
+                UPDATE run_logs SET
+                    finished_at = NOW(), status = %s,
+                    market_open = %s, stocks_scanned = %s,
+                    signals_fired = %s, trades_executed = %s,
+                    error_message = %s, log_lines = %s, duration_ms = %s
+                WHERE id = %s
+            """, (
+                status, status != 'MARKET_CLOSED',
+                stocks_scanned, signals_fired, trades_executed,
+                error_msg, tee.getvalue()[:10000], duration_ms, run_id
+            ))
+            log_conn.commit()
+            lc.close()
+            log_conn.close()
+        except Exception as le:
+            print(f"[run_logs] Could not finalize run record: {le}")
+
     conn = get_conn()
     cur = conn.cursor()
-    
-    from datetime import timezone, timedelta
-    ist = timezone(timedelta(hours=5, minutes=30))
-    now = datetime.now(ist)
+    now = datetime.now(IST)
     
     print(f"\n{'='*60}")
-    print(f"  QuantumTrader V2 — Market Scan @ {now.strftime('%Y-%m-%d %H:%M:%S')} IST")
+    print(f"  QuantumTrader V2.1 — Market Scan @ {now.strftime('%Y-%m-%d %H:%M:%S')} IST")
     print(f"{'='*60}\n")
 
     # ─── 0. Market hours guard ────────────────────────────────
@@ -89,6 +150,7 @@ def run():
         conn.commit()
         cur.close()
         conn.close()
+        finish_log('MARKET_CLOSED')
         return
 
     # ─── 1. Get portfolio state ───────────────────────────────
@@ -100,6 +162,9 @@ def run():
 
     cur.execute("SELECT COUNT(*) FROM open_positions")
     open_count = cur.fetchone()[0]
+
+    signals_total = 0   # tracks non-HOLD signals this run
+    trades_total = 0    # tracks actual BUY/SELL executions this run
 
     print(f"  Portfolio: ₹{capital:,.0f} | Cash: ₹{cash:,.0f} | Invested: ₹{invested:,.0f}")
     print(f"  Open positions: {open_count}/{MAX_POSITIONS}\n")
@@ -321,8 +386,32 @@ def run():
     conn.commit()
     cur.close()
     conn.close()
-    print(f"\n  ✅ Scan complete @ {datetime.now().strftime('%H:%M:%S')}\n")
+    print(f"\n  ✅ Scan complete @ {now.strftime('%H:%M:%S')} IST\n")
+    finish_log('SUCCESS', stocks_scanned=len(STOCKS), signals_fired=signals_total, trades_executed=trades_total)
+
+
+def _safe_run():
+    """Entry point that catches top-level crashes and logs them to run_logs."""
+    try:
+        run()
+    except Exception as e:
+        sys.stdout = sys.__stdout__  # emergency restore
+        err = traceback.format_exc()
+        print(f"\n💥 FATAL ERROR: {e}\n{err}")
+        # Try to mark the run as errored
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE run_logs SET status='ERROR', finished_at=NOW(),
+                    error_message=%s, log_lines=%s
+                WHERE id = (SELECT id FROM run_logs ORDER BY started_at DESC LIMIT 1)
+            """, (str(e)[:500], err[:10000]))
+            conn.commit(); cur.close(); conn.close()
+        except Exception:
+            pass
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    run()
+    _safe_run()

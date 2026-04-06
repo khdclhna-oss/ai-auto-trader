@@ -30,13 +30,51 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 
+def is_market_open() -> bool:
+    """Check if NSE market is currently open (9:15 AM - 3:30 PM IST, Mon-Fri)."""
+    from datetime import timezone, timedelta
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist)
+    
+    # Weekend check
+    if now_ist.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    
+    # Market hours: 9:15 AM to 3:30 PM IST
+    market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    
+    return market_open <= now_ist <= market_close
+
+
 def run():
     conn = get_conn()
     cur = conn.cursor()
-    now = datetime.now()
+    
+    from datetime import timezone, timedelta
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(ist)
+    
     print(f"\n{'='*60}")
-    print(f"  QuantumTrader V2 — Market Scan @ {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  QuantumTrader V2 — Market Scan @ {now.strftime('%Y-%m-%d %H:%M:%S')} IST")
     print(f"{'='*60}\n")
+
+    # ─── 0. Market hours guard ────────────────────────────────
+    if not is_market_open():
+        print(f"  ⏸️  Market is CLOSED. NSE trading hours: 9:15 AM - 3:30 PM IST (Mon-Fri).")
+        print(f"  Current time: {now.strftime('%A, %I:%M %p IST')}")
+        print(f"  Skipping trade execution. Only logging equity snapshot.\n")
+        
+        # Still snapshot equity so the chart stays updated
+        cur.execute("SELECT cash, invested FROM portfolio ORDER BY updated_at DESC LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            c, i = float(row[0]), float(row[1])
+            cur.execute("INSERT INTO equity_snapshots (capital, cash, invested) VALUES (%s, %s, %s)", (c + i, c, i))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
 
     # ─── 1. Get portfolio state ───────────────────────────────
     cur.execute("SELECT capital, cash, invested FROM portfolio ORDER BY updated_at DESC LIMIT 1")

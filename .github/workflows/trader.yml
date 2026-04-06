@@ -4,6 +4,13 @@ on:
   schedule:
     - cron: '*/15 3-10 * * 1-5'
   workflow_dispatch:
+    inputs:
+      run_backtest:
+        description: 'Run backtest instead of live trading'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 jobs:
   trade:
@@ -16,6 +23,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run trader
+        if: ${{ github.event.inputs.run_backtest != 'true' }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python engine/trader.py
+      - name: Run backtest
+        if: ${{ github.event.inputs.run_backtest == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python engine/backtest.py --save --period 2y

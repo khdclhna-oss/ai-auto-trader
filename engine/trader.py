@@ -1,148 +1,150 @@
+"""
+QuantumTrader V2 — Orchestrator
+=================================
+The main trading engine. Coordinates:
+  1. Multi-timeframe analysis (daily + hourly + 15m)
+  2. Market regime detection (trending / ranging / volatile)
+  3. Confluence-based signal generation
+  4. ATR-based risk management & position sizing
+  5. Trailing stop management on open positions
+  6. Signal logging for every scan
+"""
+
 import os
+import sys
 import psycopg2
-import yfinance as yf
-import pandas as pd
-import pandas_ta as ta
 from datetime import datetime
+from multi_timeframe import fetch_multi_timeframe, get_confluence
+from regime import detect_regime
+from risk_manager import (
+    calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS
+)
 from news import get_news_sentiment
 
 STOCKS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-CAPITAL = 100000
-MAX_POSITIONS = 2
-RISK_PCT = 0.02
-SL_PCT = 0.015
-TARGET_PCT = 0.03
+INITIAL_CAPITAL = 100000
+
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
-def fetch_candles(symbol):
-    df = yf.download(symbol, period="5d", interval="15m", progress=False)
-    df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
-    return df.dropna()
-
-def score_stock(df, symbol):
-    score = 0
-    reasons = []
-    close = df["close"]
-
-    # RSI
-    rsi = ta.rsi(close, length=14)
-    if rsi is not None and len(rsi.dropna()) > 0:
-        r = rsi.dropna().iloc[-1]
-        if r < 30:
-            score += 2
-            reasons.append(f"RSI oversold ({r:.1f}) +2")
-        elif r > 70:
-            score -= 2
-            reasons.append(f"RSI overbought ({r:.1f}) -2")
-
-    # MACD
-    macd = ta.macd(close, fast=12, slow=26, signal=9)
-    if macd is not None and len(macd.dropna()) > 1:
-        macd_line = macd["MACD_12_26_9"].dropna()
-        signal_line = macd["MACDs_12_26_9"].dropna()
-        if len(macd_line) > 1:
-            if macd_line.iloc[-1] > signal_line.iloc[-1] and macd_line.iloc[-2] <= signal_line.iloc[-2]:
-                score += 2
-                reasons.append("MACD bullish crossover +2")
-            elif macd_line.iloc[-1] < signal_line.iloc[-1] and macd_line.iloc[-2] >= signal_line.iloc[-2]:
-                score -= 2
-                reasons.append("MACD bearish crossover -2")
-
-    # EMA trend
-    ema20 = ta.ema(close, length=20)
-    ema50 = ta.ema(close, length=50)
-    if ema20 is not None and ema50 is not None:
-        e20 = ema20.dropna()
-        e50 = ema50.dropna()
-        if len(e20) > 0 and len(e50) > 0:
-            if e20.iloc[-1] > e50.iloc[-1]:
-                score += 1
-                reasons.append("EMA20 > EMA50 (uptrend) +1")
-            else:
-                score -= 1
-                reasons.append("EMA20 < EMA50 (downtrend) -1")
-
-    # Volume spike
-    vol = df["volume"]
-    avg_vol = vol.rolling(20).mean()
-    if len(avg_vol.dropna()) > 0 and avg_vol.iloc[-1] > 0:
-        if vol.iloc[-1] > avg_vol.iloc[-1] * 1.5:
-            score += 1
-            reasons.append("Volume spike (1.5x avg) +1")
-
-    # News sentiment
-    sentiment = get_news_sentiment(symbol.replace(".NS", ""))
-    if sentiment > 0:
-        score += 1
-        reasons.append("Positive news sentiment +1")
-    elif sentiment < 0:
-        score -= 1
-        reasons.append("Negative news sentiment -1")
-
-    return score, reasons
-
-def get_action(score):
-    if score >= 4:
-        return "BUY"
-    elif score <= -4:
-        return "SELL"
-    return "HOLD"
 
 def run():
     conn = get_conn()
     cur = conn.cursor()
+    now = datetime.now()
+    print(f"\n{'='*60}")
+    print(f"  QuantumTrader V2 — Market Scan @ {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}\n")
 
-    # Check open positions
+    # ─── 1. Get portfolio state ───────────────────────────────
+    cur.execute("SELECT capital, cash, invested FROM portfolio ORDER BY updated_at DESC LIMIT 1")
+    row = cur.fetchone()
+    capital = float(row[0]) if row else INITIAL_CAPITAL
+    cash = float(row[1]) if row else INITIAL_CAPITAL
+    invested = float(row[2]) if row else 0
+
     cur.execute("SELECT COUNT(*) FROM open_positions")
     open_count = cur.fetchone()[0]
 
-    cur.execute("SELECT capital, cash FROM portfolio ORDER BY updated_at DESC LIMIT 1")
-    row = cur.fetchone()
-    capital = float(row[0]) if row else CAPITAL
-    cash = float(row[1]) if row else CAPITAL
+    print(f"  Portfolio: ₹{capital:,.0f} | Cash: ₹{cash:,.0f} | Invested: ₹{invested:,.0f}")
+    print(f"  Open positions: {open_count}/{MAX_POSITIONS}\n")
 
+    # ─── 2. Process each stock ────────────────────────────────
     for symbol in STOCKS:
+        short_name = symbol.replace(".NS", "")
+        print(f"  ┌─ Analyzing {short_name} {'─' * (40 - len(short_name))}")
+
         try:
-            df = fetch_candles(symbol)
-            if len(df) < 60:
+            # Fetch all timeframes
+            frames = fetch_multi_timeframe(symbol)
+            df_15 = frames.get("15m")
+            df_daily = frames.get("1d")
+
+            if df_15 is None or len(df_15) < 30:
+                print(f"  │  ⚠ Insufficient data, skipping")
+                print(f"  └{'─' * 50}\n")
                 continue
 
-            score, reasons = score_stock(df, symbol)
-            action = get_action(score)
-            price = float(df["close"].iloc[-1])
-            reason_str = " + ".join(reasons) + f" → score {score:+d} → {action}"
+            # Detect market regime from daily data
+            regime_result = detect_regime(df_daily if df_daily is not None and len(df_daily) > 50 else df_15)
+            print(f"  │  Regime: {regime_result.regime} (ADX: {regime_result.adx:.1f})")
 
-            if action == "BUY" and open_count < MAX_POSITIONS and cash > 0:
-                risk_amount = capital * RISK_PCT
-                quantity = int(risk_amount / (price * SL_PCT))
-                if quantity > 0 and price * quantity <= cash:
-                    sl = round(price * (1 - SL_PCT), 2)
-                    target = round(price * (1 + TARGET_PCT), 2)
+            # Get multi-timeframe confluence
+            confluence = get_confluence(symbol, frames, regime_result.regime)
+            print(f"  │  Confluence: {confluence.confluence_score:+d} → {confluence.action}")
+            for r in confluence.reasons:
+                print(f"  │    • {r}")
+
+            # News sentiment
+            sentiment = get_news_sentiment(short_name)
+            sentiment_str = {1: "Positive", -1: "Negative", 0: "Neutral"}[sentiment]
+            print(f"  │  News: {sentiment_str}")
+
+            # Adjust confluence with sentiment
+            effective_score = confluence.confluence_score
+            if sentiment != 0:
+                effective_score += sentiment  # ±1 from news
+
+            # Current price and ATR
+            price = float(df_15["close"].iloc[-1])
+            atr = calculate_atr(df_15)
+            if atr is None:
+                atr = price * 0.01  # fallback: 1% of price
+
+            # Build reason string
+            reason_parts = confluence.reasons.copy()
+            if sentiment > 0:
+                reason_parts.append("Positive news +1")
+            elif sentiment < 0:
+                reason_parts.append("Negative news -1")
+            reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {confluence.action}"
+
+            # ─── 3. Execute trade decisions ───────────────
+            if confluence.action == "BUY" and open_count < MAX_POSITIONS and cash > 0:
+                plan = plan_position(
+                    stock=symbol,
+                    entry_price=price,
+                    atr=atr,
+                    capital=capital,
+                    regime=regime_result.regime,
+                )
+
+                if plan and plan.quantity > 0 and price * plan.quantity <= cash:
+                    print(f"  │  🟢 EXECUTING BUY: {plan.quantity} shares @ ₹{price:.2f}")
+                    print(f"  │     SL: ₹{plan.stop_loss:.2f} | TP: ₹{plan.target:.2f} | RR: {plan.reward_risk_ratio:.1f}")
+
                     cur.execute("""
                         INSERT INTO open_positions (stock, quantity, entry_price, stop_loss, target, entry_time, reason)
                         VALUES (%s, %s, %s, %s, %s, NOW(), %s)
                         ON CONFLICT (stock) DO NOTHING
-                    """, (symbol, quantity, price, sl, target, reason_str))
+                    """, (symbol, plan.quantity, price, plan.stop_loss, plan.target, reason_str))
+
                     cur.execute("""
-                        INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status)
-                        VALUES (%s, 'BUY', %s, %s, %s, NOW(), 'OPEN')
-                    """, (symbol, price, quantity, reason_str))
-                    invested = price * quantity
+                        INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status,
+                                            confluence_score, regime, atr_at_entry, sentiment_score)
+                        VALUES (%s, 'BUY', %s, %s, %s, NOW(), 'OPEN', %s, %s, %s, %s)
+                    """, (symbol, price, plan.quantity, reason_str,
+                          effective_score, regime_result.regime, atr, sentiment))
+
+                    cost = price * plan.quantity
                     cur.execute("""
                         UPDATE portfolio SET cash = cash - %s, invested = invested + %s, updated_at = NOW()
-                    """, (invested, invested))
+                    """, (cost, cost))
                     open_count += 1
-                    cash -= invested
+                    cash -= cost
+                else:
+                    print(f"  │  ⚠ BUY signal but position plan rejected (insufficient funds or bad RR)")
 
-            elif action == "SELL":
-                cur.execute("SELECT quantity, entry_price FROM open_positions WHERE stock = %s", (symbol,))
+            elif confluence.action == "SELL":
+                cur.execute("SELECT quantity, entry_price, stop_loss FROM open_positions WHERE stock = %s", (symbol,))
                 pos = cur.fetchone()
                 if pos:
-                    qty, entry = int(pos[0]), float(pos[1])
+                    qty, entry, sl = int(pos[0]), float(pos[1]), float(pos[2])
                     pnl = (price - entry) * qty
+                    print(f"  │  🔴 EXECUTING SELL: {qty} shares @ ₹{price:.2f} | P&L: ₹{pnl:+.2f}")
+
                     cur.execute("""
                         UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
                         WHERE stock=%s AND status='OPEN'
@@ -150,22 +152,103 @@ def run():
                     cur.execute("DELETE FROM open_positions WHERE stock = %s", (symbol,))
                     proceeds = price * qty
                     cur.execute("""
-                        UPDATE portfolio SET cash = cash + %s, invested = invested - %s, updated_at = NOW()
-                    """, (proceeds, entry * qty))
+                        UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
+                                             capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
+                    """, (proceeds, entry * qty, pnl, pnl))
                     open_count -= 1
                     cash += proceeds
 
             # Always log the signal
             cur.execute("""
-                INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status)
-                VALUES (%s, %s, %s, 0, %s, NOW(), 'CLOSED')
-            """, (symbol, action if action == "HOLD" else action, price, reason_str))
+                INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status,
+                                    confluence_score, regime, atr_at_entry, sentiment_score)
+                VALUES (%s, %s, %s, 0, %s, NOW(), 'SIGNAL', %s, %s, %s, %s)
+            """, (symbol, confluence.action, price, reason_str,
+                  effective_score, regime_result.regime, atr, sentiment))
+
+            # Log to signal_log table for analytics
+            daily_indicators = confluence.daily.indicators
+            hourly_indicators = confluence.hourly.indicators
+            cur.execute("""
+                INSERT INTO signal_log (stock, regime, adx, atr, confluence_score, action,
+                                        rsi, ema_trend, news_sentiment)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (symbol, regime_result.regime, regime_result.adx, atr,
+                  effective_score, confluence.action,
+                  hourly_indicators.get("rsi"),
+                  "UP" if confluence.daily.direction > 0 else "DOWN",
+                  sentiment))
 
         except Exception as e:
-            print(f"Error processing {symbol}: {e}")
-            continue
+            print(f"  │  ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
 
-    # Snapshot equity
+        print(f"  └{'─' * 50}\n")
+
+    # ─── 4. Manage trailing stops on open positions ───────────
+    print(f"  {'─' * 50}")
+    print(f"  Managing trailing stops...")
+    cur.execute("SELECT stock, quantity, entry_price, stop_loss, target FROM open_positions")
+    positions = cur.fetchall()
+
+    for pos in positions:
+        stock, qty, entry, sl, target = pos[0], int(pos[1]), float(pos[2]), float(pos[3]), float(pos[4])
+        short = stock.replace(".NS", "")
+
+        try:
+            frames = fetch_multi_timeframe(stock)
+            df_15 = frames.get("15m")
+            if df_15 is None or len(df_15) < 2:
+                continue
+
+            current_price = float(df_15["close"].iloc[-1])
+            atr = calculate_atr(df_15) or (current_price * 0.01)
+
+            # Check if target was hit
+            if current_price >= target:
+                pnl = (current_price - entry) * qty
+                print(f"  🎯 {short}: Target hit @ ₹{current_price:.2f} | P&L: +₹{pnl:.2f}")
+                cur.execute("""
+                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
+                    WHERE stock=%s AND status='OPEN'
+                """, (current_price, pnl, stock))
+                cur.execute("DELETE FROM open_positions WHERE stock = %s", (stock,))
+                proceeds = current_price * qty
+                cur.execute("""
+                    UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
+                                         capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
+                """, (proceeds, entry * qty, pnl, pnl))
+                continue
+
+            # Check trailing stop
+            trail = check_trailing_stop(stock, entry, current_price, sl, atr)
+
+            if trail.should_close:
+                pnl = (current_price - entry) * qty
+                print(f"  🛑 {short}: Stop hit @ ₹{current_price:.2f} | P&L: ₹{pnl:+.2f}")
+                cur.execute("""
+                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
+                    WHERE stock=%s AND status='OPEN'
+                """, (current_price, pnl, stock))
+                cur.execute("DELETE FROM open_positions WHERE stock = %s", (stock,))
+                proceeds = current_price * qty
+                cur.execute("""
+                    UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
+                                         capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
+                """, (proceeds, entry * qty, pnl, pnl))
+            elif trail.should_update:
+                print(f"  📈 {short}: Trailing stop moved ₹{sl:.2f} → ₹{trail.new_stop:.2f}")
+                cur.execute("""
+                    UPDATE open_positions SET stop_loss = %s WHERE stock = %s
+                """, (trail.new_stop, stock))
+            else:
+                print(f"  ⏳ {short}: Holding @ ₹{current_price:.2f} (P&L: ₹{trail.unrealized_pnl:+.2f})")
+
+        except Exception as e:
+            print(f"  ❌ Error managing {short}: {e}")
+
+    # ─── 5. Snapshot equity ───────────────────────────────────
     cur.execute("SELECT cash, invested FROM portfolio ORDER BY updated_at DESC LIMIT 1")
     row = cur.fetchone()
     if row:
@@ -174,10 +257,19 @@ def run():
             INSERT INTO equity_snapshots (capital, cash, invested) VALUES (%s, %s, %s)
         """, (c + i, c, i))
 
+    # ─── 6. Update P&L percentage ─────────────────────────────
+    cur.execute("SELECT capital, pnl FROM portfolio ORDER BY updated_at DESC LIMIT 1")
+    row = cur.fetchone()
+    if row:
+        cap, pnl = float(row[0]), float(row[1])
+        pnl_pct = (pnl / INITIAL_CAPITAL) * 100 if INITIAL_CAPITAL > 0 else 0
+        cur.execute("UPDATE portfolio SET pnl_pct = %s WHERE id = (SELECT id FROM portfolio ORDER BY updated_at DESC LIMIT 1)", (pnl_pct,))
+
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Done at {datetime.now()}")
+    print(f"\n  ✅ Scan complete @ {datetime.now().strftime('%H:%M:%S')}\n")
+
 
 if __name__ == "__main__":
     run()

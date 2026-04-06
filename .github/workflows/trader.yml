@@ -1,0 +1,21 @@
+name: AI Auto Trader
+
+on:
+  schedule:
+    - cron: '*/15 3-10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run trader
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python engine/trader.py

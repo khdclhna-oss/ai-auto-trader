@@ -26,11 +26,26 @@ from typing import List, Optional
 # Add engine dir to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-STOCKS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
+STOCKS = [
+    # Financials
+    "HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS", "AXISBANK.NS", "SBILIFE.NS",
+    # IT
+    "TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS",
+    # Energy & Industrials
+    "RELIANCE.NS", "NTPC.NS", "POWERGRID.NS",
+    # FMCG
+    "HINDUNILVR.NS", "NESTLEIND.NS",
+    # Auto
+    "MARUTI.NS", "TATAMOTORS.NS",
+    # Pharma
+    "SUNPHARMA.NS", "DRREDDY.NS",
+    # Metals & Telecom
+    "TATASTEEL.NS", "BHARTIARTL.NS",
+]
 INITIAL_CAPITAL = 100000
 RISK_PER_TRADE = 0.02
 ATR_SL_MULT = 2.0
-ATR_TP_MULT = 3.0
+ATR_TP_MULT = 4.0    # V2.1: widened from 3x → 4x ATR for better RR
 MAX_POSITIONS = 3
 
 
@@ -116,9 +131,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def score_bar(row, prev_row) -> tuple:
-    """Score a single bar using V2 confluence logic (simplified for daily backtest)."""
+    """Score a single bar using V2.1 confluence logic."""
     score = 0
     reasons = []
+
+    # ADX check: skip RANGING regime entirely
+    adx_val = float(row.get("adx", 20)) if hasattr(row, "get") else float(row["adx"]) if "adx" in row.index else 20
+    if adx_val < 20:
+        return 0, "HOLD", ["RANGING regime — skipped"]
 
     # Daily trend (EMA 50/200)
     if row["ema50"] > row["ema200"]:
@@ -129,15 +149,15 @@ def score_bar(row, prev_row) -> tuple:
         reasons.append("EMA50<200")
 
     # RSI
-    if row["rsi"] < 30:
+    if row["rsi"] < 35:
         score += 1
         reasons.append(f"RSI oversold({row['rsi']:.0f})")
-    elif row["rsi"] > 70:
+    elif row["rsi"] > 65:
         score -= 1
         reasons.append(f"RSI overbought({row['rsi']:.0f})")
 
     # MACD crossover
-    if hasattr(row, "macd") and hasattr(prev_row, "macd"):
+    if "macd" in row.index and "macd" in prev_row.index:
         if row["macd"] > row["macd_signal"] and prev_row["macd"] <= prev_row["macd_signal"]:
             score += 1
             reasons.append("MACD bullish cross")
@@ -158,16 +178,10 @@ def score_bar(row, prev_row) -> tuple:
         score += 1
         reasons.append("Vol spike")
 
-    # Regime-adaptive threshold
-    adx_val = row.get("adx", 20)
-    if adx_val > 25:
-        buy_thresh, sell_thresh = 3, -3
-    else:
-        buy_thresh, sell_thresh = 4, -4
-
-    if score >= buy_thresh:
+    # V2.1: Tightened threshold — require full 3-point confluence
+    if score >= 3:
         action = "BUY"
-    elif score <= sell_thresh:
+    elif score <= -3:
         action = "SELL"
     else:
         action = "HOLD"

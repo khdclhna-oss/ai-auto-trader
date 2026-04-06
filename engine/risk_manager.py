@@ -18,13 +18,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# Configuration
+# Configuration  (V2.1)
 RISK_PER_TRADE = 0.02    # 2% of capital per trade
 ATR_SL_MULTIPLIER = 2.0  # stop = entry - 2*ATR
-ATR_TP_MULTIPLIER = 3.0  # target = entry + 3*ATR
-TRAIL_ACTIVATION = 1.5   # activate trailing after 1.5*ATR profit
+ATR_TP_MULTIPLIER = 4.0  # target = entry + 4*ATR  (↑ from 3x → better RR)
+TRAIL_ACTIVATION = 2.0   # activate trailing after 2*ATR profit (gives trade room)
 TRAIL_DISTANCE = 1.0     # trail stop by 1*ATR once activated
-MAX_POSITIONS = 3         # max simultaneous positions (up from 2)
+MAX_POSITIONS = 3         # max simultaneous positions
 
 
 @dataclass

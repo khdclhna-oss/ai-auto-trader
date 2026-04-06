@@ -21,7 +21,22 @@ from risk_manager import (
 )
 from news import get_news_sentiment
 
-STOCKS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
+STOCKS = [
+    # Financials
+    "HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS", "AXISBANK.NS", "SBILIFE.NS",
+    # IT
+    "TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS",
+    # Energy & Industrials
+    "RELIANCE.NS", "NTPC.NS", "POWERGRID.NS",
+    # FMCG
+    "HINDUNILVR.NS", "NESTLEIND.NS",
+    # Auto
+    "MARUTI.NS", "TATAMOTORS.NS",
+    # Pharma
+    "SUNPHARMA.NS", "DRREDDY.NS",
+    # Metals & Telecom
+    "TATASTEEL.NS", "BHARTIARTL.NS",
+]
 DATABASE_URL = os.environ["DATABASE_URL"]
 INITIAL_CAPITAL = 100000
 

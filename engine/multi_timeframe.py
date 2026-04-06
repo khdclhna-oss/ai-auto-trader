@@ -244,15 +244,18 @@ def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:
     all_reasons = daily.reasons + hourly.reasons + quarter.reasons
 
     # Regime-adaptive thresholds
-    if regime == "TRENDING":
-        buy_threshold = 2   # easier to buy in trends
-        sell_threshold = -2
-    elif regime == "RANGING":
-        buy_threshold = 3   # harder to buy in ranges (need full confluence)
-        sell_threshold = -3
-    else:
-        buy_threshold = 3
-        sell_threshold = -3
+    # V2.1: RANGING regime = no trades. Momentum strategies need a trend.
+    if regime == "RANGING":
+        # Don't trade in directionless markets — edge disappears
+        return ConfluenceResult(
+            stock=stock, daily=daily, hourly=hourly, quarter=quarter,
+            confluence_score=confluence, action="HOLD",
+            regime=regime, reasons=all_reasons + ["RANGING regime — no trades"],
+        )
+
+    # TRENDING or VOLATILE: require all 3 timeframes aligned (score ≥ 3)
+    buy_threshold = 3    # All 3 TFs must be bullish
+    sell_threshold = -3  # All 3 TFs must be bearish
 
     if confluence >= buy_threshold:
         action = "BUY"

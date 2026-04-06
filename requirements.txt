@@ -1,5 +1,5 @@
-yfinance==0.2.36
-pandas==2.2.0
+yfinance
+pandas
 pandas-ta
 psycopg2-binary==2.9.9
 feedparser==6.0.11

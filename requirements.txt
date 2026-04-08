@@ -1,6 +1,8 @@
 yfinance
 pandas
 pandas-ta
-psycopg2-binary==2.9.9
-feedparser==6.0.11
-requests==2.31.0
+psycopg2-binary
+feedparser
+google-genai
+tenacity
+requests

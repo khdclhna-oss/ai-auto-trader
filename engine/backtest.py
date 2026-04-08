@@ -272,7 +272,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                 # Stop loss hit
                 if float(row["low"]) <= pos["sl"]:
                     exit_price = pos["sl"]
-                    c = calculate_charges(pos["entry"], exit_price, pos["qty"], is_intraday=True)
+                    c = calculate_charges(pos["entry"], exit_price, pos["qty"], is_intraday=False)
                     pnl = c.net_pnl
                     all_trades.append(BacktestTrade(
                         symbol, "SELL", pos["entry"], exit_price, pos["qty"],
@@ -288,7 +288,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                 # Target hit
                 if float(row["high"]) >= pos["target"]:
                     exit_price = pos["target"]
-                    c = calculate_charges(pos["entry"], exit_price, pos["qty"], is_intraday=True)
+                    c = calculate_charges(pos["entry"], exit_price, pos["qty"], is_intraday=False)
                     pnl = c.net_pnl
                     all_trades.append(BacktestTrade(
                         symbol, "SELL", pos["entry"], exit_price, pos["qty"],
@@ -331,7 +331,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
 
             elif action == "SELL" and symbol in positions:
                 pos = positions[symbol]
-                c = calculate_charges(pos["entry"], price, pos["qty"], is_intraday=True)
+                c = calculate_charges(pos["entry"], price, pos["qty"], is_intraday=False)
                 pnl = c.net_pnl
                 all_trades.append(BacktestTrade(
                     symbol, "SELL", pos["entry"], price, pos["qty"],

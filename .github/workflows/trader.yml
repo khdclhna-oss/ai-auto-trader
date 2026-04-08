@@ -20,6 +20,7 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.12'
+          cache: 'pip'
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run trader
@@ -28,6 +29,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python engine/trader.py
       - name: Run backtest
         if: ${{ github.event.inputs.run_backtest == 'true' }}
@@ -35,4 +37,5 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python engine/backtest.py --save --period 2y

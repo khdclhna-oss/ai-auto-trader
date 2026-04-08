@@ -19,11 +19,13 @@ import psycopg2
 from datetime import datetime, timezone, timedelta
 from multi_timeframe import fetch_multi_timeframe, get_confluence
 from regime import detect_regime
+from tenacity import retry, wait_fixed, stop_after_attempt
 from risk_manager import (
     calculate_atr, plan_position, check_trailing_stop
 )
 MAX_POSITIONS = 10  # Scaled for 100 stocks
-from news import get_news_sentiment
+from calculator import calculate_realistic_charges
+from sentiment_llm import get_llm_sentiment
 from alerts import send_telegram_alert
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -60,7 +62,9 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 INITIAL_CAPITAL = 100000
 
 
+@retry(wait=wait_fixed(5), stop=stop_after_attempt(3))
 def get_conn():
+    """Warming up the database with a tenacity retry wrapper (Neon sleep handling)."""
     return psycopg2.connect(DATABASE_URL)
 
 
@@ -201,6 +205,9 @@ def run():
 
     cur.execute("SELECT COUNT(*) FROM open_positions")
     open_count = cur.fetchone()[0]
+    
+    cur.execute("SELECT stock FROM open_positions")
+    held_stocks = {row[0] for row in cur.fetchall()}
 
     signals_total = 0   # tracks non-HOLD signals this run
     trades_total = 0    # tracks actual BUY/SELL executions this run
@@ -241,10 +248,15 @@ def run():
             for r in confluence.reasons:
                 print(f"  │    • {r}")
 
-            # News sentiment
-            sentiment = get_news_sentiment(short_name)
+            # Get qualitative sentiment (LLM 2.0)
+            sentiment_score = get_llm_sentiment(symbol)
+            # Normalize: if LLM says > 0.3, add +1 to score; if < -0.3, sub 1
+            sentiment = 0
+            if sentiment_score > 0.3: sentiment = 1
+            if sentiment_score < -0.3: sentiment = -1
+            
             sentiment_str = {1: "Positive", -1: "Negative", 0: "Neutral"}[sentiment]
-            print(f"  │  News: {sentiment_str}")
+            print(f"  │  LLM News: {sentiment_str} ({sentiment_score:+.2f})")
 
             # Adjust confluence with sentiment
             effective_score = confluence.confluence_score
@@ -266,7 +278,10 @@ def run():
             reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {confluence.action}"
 
             # ─── 3. Execute trade decisions ───────────────
-            if confluence.action == "BUY" and open_count < MAX_POSITIONS and cash > 0:
+            # LIQUIDITY CHECK: Ensure we aren't trading more than 10% of interval volume
+            last_volume = float(df_15["volume"].iloc[-1])
+            
+            if confluence.action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS and cash > 0:
                 plan = plan_position(
                     stock=symbol,
                     entry_price=price,
@@ -275,9 +290,13 @@ def run():
                     regime=regime_result.regime,
                 )
 
-                if plan and plan.quantity > 0 and price * plan.quantity <= cash:
-                    print(f"  │  🟢 EXECUTING BUY: {plan.quantity} shares @ ₹{price:.2f}")
-                    print(f"  │     SL: ₹{plan.stop_loss:.2f} | TP: ₹{plan.target:.2f} | RR: {plan.reward_risk_ratio:.1f}")
+                if plan and plan.quantity > 0:
+                    # Realistic Penalty: Reject if quantity is too high for the interval
+                    if plan.quantity > last_volume * 0.1:
+                        print(f"  │  ⚠ BUY REJECTED: Low Liquidity ({plan.quantity} qty vs {last_volume} vol)")
+                    elif price * plan.quantity <= cash:
+                        print(f"  │  🟢 EXECUTING BUY: {plan.quantity} shares @ ₹{price:.2f}")
+                        print(f"  │     SL: ₹{plan.stop_loss:.2f} | TP: ₹{plan.target:.2f} | RR: {plan.reward_risk_ratio:.1f}")
 
                     send_telegram_alert(
                         f"🚨 <b>BUY EXECUTED: {short_name}</b>\n\n"
@@ -316,23 +335,26 @@ def run():
                 pos = cur.fetchone()
                 if pos:
                     qty, entry, sl = int(pos[0]), float(pos[1]), float(pos[2])
-                    pnl = (price - entry) * qty
-                    print(f"  │  🔴 EXECUTING SELL: {qty} shares @ ₹{price:.2f} | P&L: ₹{pnl:+.2f}")
+                    # Fix: Using Institutional Hardened Taxes & Slippage
+                    c = calculate_realistic_charges(entry, price, qty, is_intraday=False)
+                    pnl = c.net_pnl
+                    print(f"  │  🔴 EXECUTING SELL: {qty} shares @ ₹{price:.2f} | Net P&L: ₹{pnl:+.2f}")
 
                     send_telegram_alert(
                         f"🔴 <b>SELL EXECUTED: {short_name}</b>\n\n"
                         f"Quantity: {qty}\n"
                         f"Entry: ₹{entry:.2f}\n"
                         f"Exit: ₹{price:.2f}\n"
-                        f"P&L: ₹{pnl:+.2f} ({((price-entry)/entry)*100:+.2f}%)"
+                        f"Taxes & Slippage: ₹{c.total:.2f}\n"
+                        f"Net P&L: ₹{pnl:+.2f} ({c.net_pnl_pct:+.2f}%)"
                     )
 
                     cur.execute("""
-                        UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
+                        UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s
                         WHERE stock=%s AND status='OPEN'
-                    """, (price, pnl, symbol))
+                    """, (price, pnl, c.total, symbol))
                     cur.execute("DELETE FROM open_positions WHERE stock = %s", (symbol,))
-                    proceeds = price * qty
+                    proceeds = price * qty - c.total
                     cur.execute("""
                         UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
                                              capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
@@ -394,47 +416,61 @@ def run():
 
             # Check if target was hit
             if current_price >= target:
-                pnl = (current_price - entry) * qty
-                print(f"  🎯 {short}: Target hit @ ₹{current_price:.2f} | P&L: +₹{pnl:.2f}")
+                # Fix: Use Delivery Hardened charges
+                c = calculate_realistic_charges(entry, current_price, qty, is_intraday=False)
+                pnl = c.net_pnl
+                print(f"  🎯 {short}: Target hit @ ₹{current_price:.2f} | Net P&L: +₹{pnl:.2f}")
                 send_telegram_alert(
                     f"🎯 <b>TARGET HIT: {short}</b>\n\n"
                     f"Quantity: {qty}\n"
                     f"Entry: ₹{entry:.2f}\n"
                     f"Exit: ₹{current_price:.2f}\n"
-                    f"P&L: ₹{pnl:+.2f} ({((current_price-entry)/entry)*100:+.2f}%)"
+                    f"Taxes & Slippage: ₹{c.total:.2f}\n"
+                    f"Net P&L: ₹{pnl:+.2f} ({c.net_pnl_pct:+.2f}%)"
                 )
                 cur.execute("""
-                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
+                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s
                     WHERE stock=%s AND status='OPEN'
-                """, (current_price, pnl, stock))
+                """, (current_price, pnl, c.total, stock))
                 cur.execute("DELETE FROM open_positions WHERE stock = %s", (stock,))
-                proceeds = current_price * qty
+                proceeds = current_price * qty - c.total
                 cur.execute("""
                     UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
                                          capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
                 """, (proceeds, entry * qty, pnl, pnl))
                 continue
 
+            # STRATEGY: 📈 BREAK-EVEN TRIGGER
+            # If price moves +1.5% in favor, move SL to Entry Price
+            unrealized_pct = ((current_price - entry) / entry) * 100
+            if unrealized_pct >= 1.5 and sl < entry:
+                print(f"  🛡️ {short}: BREAK-EVEN TRIGGER! Moving SL: ₹{sl:.2f} → ₹{entry:.2f}")
+                sl = entry
+                cur.execute("UPDATE open_positions SET stop_loss = %s WHERE stock = %s", (entry, stock))
+
             # Check trailing stop
             trail = check_trailing_stop(stock, entry, current_price, sl, atr, adx=adx_val)
 
             if trail.should_close:
-                pnl = (current_price - entry) * qty
-                print(f"  🛑 {short}: Stop hit @ ₹{current_price:.2f} | P&L: ₹{pnl:+.2f}")
+                # Fix: Use Delivery Hardened charges
+                c = calculate_realistic_charges(entry, current_price, qty, is_intraday=False)
+                pnl = c.net_pnl
+                print(f"  🛑 {short}: Stop hit @ ₹{current_price:.2f} | Net P&L: ₹{pnl:+.2f}")
                 send_telegram_alert(
                     f"🛑 <b>STOP HIT: {short}</b>\n\n"
                     f"Quantity: {qty}\n"
                     f"Entry: ₹{entry:.2f}\n"
                     f"Exit: ₹{current_price:.2f}\n"
-                    f"P&L: ₹{pnl:+.2f} ({((current_price-entry)/entry)*100:+.2f}%)\n"
-                    f"Stop Trailed From: ₹{sl:.2f}"
+                    f"Taxes & Slippage: ₹{c.total:.2f}\n"
+                    f"Net P&L: ₹{pnl:+.2f} ({c.net_pnl_pct:+.2f}%)\n"
+                    f"Stop Trailed From: ₹{trail.old_sl if hasattr(trail, 'old_sl') else sl:.2f}"
                 )
                 cur.execute("""
-                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
+                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s
                     WHERE stock=%s AND status='OPEN'
-                """, (current_price, pnl, stock))
+                """, (current_price, pnl, c.total, stock))
                 cur.execute("DELETE FROM open_positions WHERE stock = %s", (stock,))
-                proceeds = current_price * qty
+                proceeds = current_price * qty - c.total
                 cur.execute("""
                     UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
                                          capital = capital + %s, pnl = pnl + %s, updated_at = NOW()

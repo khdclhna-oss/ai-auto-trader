@@ -43,7 +43,7 @@ def fetch_multi_timeframe(symbol: str) -> dict:
     """Download candle data for all three timeframes."""
     frames = {}
     try:
-        df_d = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        df_d = yf.download(symbol, period="2y", interval="1d", progress=False)
         df_d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_d.columns]
         frames["1d"] = df_d.dropna()
     except Exception:

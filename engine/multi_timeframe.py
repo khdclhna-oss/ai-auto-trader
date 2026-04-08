@@ -259,7 +259,7 @@ def analyze_15min(df: pd.DataFrame) -> TimeframeBias:
     # VWAP Institutional Anchoring
     if "volume" in df.columns:
         try:
-            vwap_series = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+            vwap_series = ta.vwap(df["high"], df["low"], df["close"], df["volume"], anchor="D")
             if vwap_series is not None and len(vwap_series.dropna()) > 1:
                 curr_vwap = float(vwap_series.iloc[-1])
                 prev_vwap = float(vwap_series.iloc[-2])

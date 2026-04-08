@@ -20,8 +20,9 @@ from datetime import datetime, timezone, timedelta
 from multi_timeframe import fetch_multi_timeframe, get_confluence
 from regime import detect_regime
 from risk_manager import (
-    calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS
+    calculate_atr, plan_position, check_trailing_stop
 )
+MAX_POSITIONS = 10  # Scaled for 100 stocks
 from news import get_news_sentiment
 from alerts import send_telegram_alert
 
@@ -42,20 +43,18 @@ class TeeLogger:
         return self._buf.getvalue()
 
 STOCKS = [
-    # Financials
-    "HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS", "AXISBANK.NS", "SBILIFE.NS",
-    # IT
-    "TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS",
-    # Energy & Industrials
-    "RELIANCE.NS", "NTPC.NS", "POWERGRID.NS",
-    # FMCG
-    "HINDUNILVR.NS", "NESTLEIND.NS",
-    # Auto
-    "MARUTI.NS", "TATAMOTORS.NS",
-    # Pharma
-    "SUNPHARMA.NS", "DRREDDY.NS",
-    # Metals & Telecom
-    "TATASTEEL.NS", "BHARTIARTL.NS",
+    "ABB.NS", "ACC.NS", "ADANIENT.NS", "ADANIPORTS.NS", "ADANIPOWER.NS", "AMBUJACEM.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", 
+    "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS", "BANKBARODA.NS", "BEL.NS", "BHARTIARTL.NS", "BPCL.NS", 
+    "BRITANNIA.NS", "CANBK.NS", "CHOLAFIN.NS", "CIPLA.NS", "COALINDIA.NS", "COLPAL.NS", "CONCOR.NS", "DLF.NS", "DABUR.NS", 
+    "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS", "GAIL.NS", "GODREJCP.NS", "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", 
+    "HDFCLIFE.NS", "HAVELLS.NS", "HEROMOTOCO.NS", "HINDALCO.NS", "HAL.NS", "HINDUNILVR.NS", "ICICIBANK.NS", "ICICIGI.NS", 
+    "ICICIPRULI.NS", "ITC.NS", "INDHOTEL.NS", "IOC.NS", "IRCTC.NS", "INDUSINDBK.NS", "INFY.NS", "INDIGO.NS", "JSWSTEEL.NS", 
+    "JINDALSTEL.NS", "KOTAKBANK.NS", "LTIM.NS", "LT.NS", "M&M.NS", "MARICO.NS", "MARUTI.NS", "NTPC.NS", "NESTLEIND.NS", 
+    "ONGC.NS", "PIDILITIND.NS", "PFC.NS", "POWERGRID.NS", "PNB.NS", "RECLTD.NS", "RELIANCE.NS", "SBICARD.NS", "SBILIFE.NS", 
+    "SBIN.NS", "SRF.NS", "SHREECEM.NS", "SHRIRAMFIN.NS", "SIEMENS.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS", 
+    "TATAPOWER.NS", "TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS", "TRENT.NS", "TVSMOTOR.NS", "ULTRACEMCO.NS", "UNITDSPR.NS", 
+    "VBL.NS", "VEDL.NS", "WIPRO.NS", "ZOMATO.NS", "ZYDUSLIFE.NS", "BHEL.NS", "IDFCFIRSTB.NS", "IRFC.NS", "JIOFIN.NS", 
+    "LODHA.NS", "OFSS.NS", "PAGEIND.NS", "TATACOMM.NS", "ADANIENSOL.NS", "ADANIGREEN.NS", "ATGL.NS", "BAJAJHLDNG.NS"
 ]
 DATABASE_URL = os.environ["DATABASE_URL"]
 INITIAL_CAPITAL = 100000
@@ -80,6 +79,45 @@ def is_market_open() -> bool:
     market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
     
     return market_open <= now_ist <= market_close
+
+
+def fetch_batch_universe(tickers: list) -> dict:
+    """Download market data for 100+ stocks in just 3 efficient requests."""
+    import yfinance as yf
+    print(f"  📥 Batch fetching universe ({len(tickers)} stocks)...")
+    
+    try:
+        # 1. Daily data (2 years)
+        df_d_all = yf.download(tickers, period="2y", interval="1d", progress=False, group_by='ticker')
+        # 2. Hourly data (1 month)
+        df_h_all = yf.download(tickers, period="1mo", interval="1h", progress=False, group_by='ticker')
+        # 3. 15-min data (5 days)
+        df_15_all = yf.download(tickers, period="5d", interval="15m", progress=False, group_by='ticker')
+        
+        universe = {}
+        for ticker in tickers:
+            try:
+                # Handle MultiIndex result if yfinance returns one
+                d_df = df_d_all[ticker].copy() if ticker in df_d_all else None
+                h_df = df_h_all[ticker].copy() if ticker in df_h_all else None
+                f_df = df_15_all[ticker].copy() if ticker in df_15_all else None
+                
+                # Cleanup: lowercase column names
+                if d_df is not None: d_df.columns = [c.lower() for c in d_df.columns]
+                if h_df is not None: h_df.columns = [c.lower() for c in h_df.columns]
+                if f_df is not None: f_df.columns = [c.lower() for c in f_df.columns]
+                
+                universe[ticker] = {
+                    "1d": d_df.dropna() if d_df is not None else None,
+                    "1h": h_df.dropna() if h_df is not None else None,
+                    "15m": f_df.dropna() if f_df is not None else None
+                }
+            except Exception:
+                universe[ticker] = {"1d": None, "1h": None, "15m": None}
+        return universe
+    except Exception as e:
+        print(f"  ❌ Batch fetch failed: {e}")
+        return {}
 
 
 def run():
@@ -170,14 +208,21 @@ def run():
     print(f"  Portfolio: ₹{capital:,.0f} | Cash: ₹{cash:,.0f} | Invested: ₹{invested:,.0f}")
     print(f"  Open positions: {open_count}/{MAX_POSITIONS}\n")
 
-    # ─── 2. Process each stock ────────────────────────────────
+    # ─── 2. Batch Fetch Universe Data ──────────────────────────
+    universe_data = fetch_batch_universe(STOCKS)
+    if not universe_data:
+        print("  ❌ No market data received. Critical failure.")
+        finish_log('ERROR', error_msg="Batch fetch failed")
+        return
+
+    # ─── 3. Process each stock ────────────────────────────────
     for symbol in STOCKS:
         short_name = symbol.replace(".NS", "")
         print(f"  ┌─ Analyzing {short_name} {'─' * (40 - len(short_name))}")
 
         try:
-            # Fetch all timeframes
-            frames = fetch_multi_timeframe(symbol)
+            # Fetch all timeframes from the pre-downloaded universe
+            frames = universe_data.get(symbol, {})
             df_15 = frames.get("15m")
             df_daily = frames.get("1d")
 
@@ -334,7 +379,7 @@ def run():
         short = stock.replace(".NS", "")
 
         try:
-            frames = fetch_multi_timeframe(stock)
+            frames = universe_data.get(stock, {})
             df_15 = frames.get("15m")
             if df_15 is None or len(df_15) < 2:
                 continue

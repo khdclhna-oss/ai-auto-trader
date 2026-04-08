@@ -199,7 +199,7 @@ def analyze_hourly(df: pd.DataFrame) -> TimeframeBias:
     except Exception:
         pass
 
-    return TimeframeBias("1h", max(-1, min(1, direction)), min(strength, 1.0), reasons, indicators)
+    return TimeframeBias("1h", direction, min(strength, 1.0), reasons, indicators)
 
 
 def analyze_15min(df: pd.DataFrame) -> TimeframeBias:
@@ -285,7 +285,7 @@ def analyze_15min(df: pd.DataFrame) -> TimeframeBias:
         except Exception:
             pass
 
-    return TimeframeBias("15m", max(-1, min(1, direction)), min(strength, 1.0), reasons, indicators)
+    return TimeframeBias("15m", direction, min(strength, 1.0), reasons, indicators)
 
 
 def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:

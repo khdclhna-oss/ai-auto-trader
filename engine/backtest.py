@@ -140,9 +140,6 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["kcu"] = ema20 + 1.5 * atr20
     df["kcl"] = ema20 - 1.5 * atr20
 
-    # Daily VWAP (proxy for intra-day)
-    df["vwap"] = ta.vwap(high, low, close, df["volume"])
-
     return df.dropna()
 
 
@@ -202,21 +199,10 @@ def score_bar(row, prev_row) -> tuple:
         score += 1
         reasons.append("Squeeze Breakout")
 
-    # VWAP Anchoring
-    if "vwap" in row.index and not pd.isna(row["vwap"]):
-        if row["close"] > row["vwap"] and prev_row["close"] <= prev_row["vwap"]:
-            score += 1
-            reasons.append("VWAP Breakout")
-        elif row["close"] > row["vwap"]:
-            pct_vwap = (row["close"] - row["vwap"]) / row["vwap"] * 100
-            if pct_vwap >= 1.5:
-                score -= 1
-                reasons.append("Extended>VWAP")
-
     # V2.5: Tightened threshold — require strict multi-factor confluence
     if score >= 4:
         action = "BUY"
-    elif score <= -3:
+    elif score <= -4:
         action = "SELL"
     else:
         action = "HOLD"

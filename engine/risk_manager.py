@@ -133,6 +133,7 @@ def check_trailing_stop(
     current_price: float,
     current_stop: float,
     atr: float,
+    adx: Optional[float] = None,
 ) -> TrailingStopUpdate:
     """
     Manage trailing stops on open positions.
@@ -141,6 +142,7 @@ def check_trailing_stop(
     1. If price hits stop → close the trade
     2. If price moved 1.5*ATR above entry → activate trailing
     3. Trail stop = current_price - 1*ATR (ratchets up, never down)
+    4. ADX Decay (V2.5): if ADX < 25 while in profit, slam stop up to 0.5 ATR
     """
     unrealized_pnl = current_price - entry_price
 
@@ -156,16 +158,19 @@ def check_trailing_stop(
             unrealized_pnl=unrealized_pnl,
         )
 
-    # Check if target was hit
-    # (handled separately in trader.py)
-
     # Check if trailing should activate
     profit_in_atr = unrealized_pnl / atr if atr > 0 else 0
     new_stop = current_stop
 
     if profit_in_atr >= TRAIL_ACTIVATION:
-        # Trail stop = price - 1*ATR, but never move it DOWN
-        candidate_stop = round(current_price - (TRAIL_DISTANCE * atr), 2)
+        trail_dist = TRAIL_DISTANCE
+        
+        # ADX Decay Check
+        if adx is not None and adx < 25:
+            trail_dist = 0.5  # tighten aggressively
+        
+        # Trail stop = price - dist*ATR, but never move it DOWN
+        candidate_stop = round(current_price - (trail_dist * atr), 2)
         # Ensure we're at least at breakeven
         candidate_stop = max(candidate_stop, entry_price)
         # Never lower the stop

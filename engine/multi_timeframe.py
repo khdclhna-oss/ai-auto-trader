@@ -170,6 +170,35 @@ def analyze_hourly(df: pd.DataFrame) -> TimeframeBias:
                 strength += 0.3
                 reasons.append(f"MACD histogram accelerating bearish")
 
+    # Volatility Squeeze (Bollinger within Keltner)
+    try:
+        sma20 = close.rolling(20).mean()
+        std20 = close.rolling(20).std()
+        bbu = sma20 + 2 * std20
+        bbl = sma20 - 2 * std20
+        
+        atr20 = ta.atr(df["high"], df["low"], close, length=20)
+        ema20 = ta.ema(close, length=20)
+        
+        if atr20 is not None and ema20 is not None and len(bbu.dropna()) > 1:
+            curr_bbu = bbu.iloc[-1]
+            curr_bbl = bbl.iloc[-1]
+            curr_kcu = ema20.iloc[-1] + 1.5 * atr20.iloc[-1]
+            curr_kcl = ema20.iloc[-1] - 1.5 * atr20.iloc[-1]
+            
+            prev_bbu = bbu.iloc[-2]
+            prev_kcu = ema20.iloc[-2] + 1.5 * atr20.iloc[-2]
+            
+            if (curr_bbu < curr_kcu) and (curr_bbl > curr_kcl): # Squeeze ON
+                direction -= 1
+                reasons.append("Volatility squeeze ON (waiting)")
+            elif (prev_bbu < prev_kcu) and (curr_bbu >= curr_kcu): # Breakout
+                direction += 1
+                strength += 0.5
+                reasons.append("Volatility squeeze FIRED (Bullish breakout)")
+    except Exception:
+        pass
+
     return TimeframeBias("1h", max(-1, min(1, direction)), min(strength, 1.0), reasons, indicators)
 
 
@@ -227,6 +256,35 @@ def analyze_15min(df: pd.DataFrame) -> TimeframeBias:
                 strength *= 0.5  # low volume = weak signal
                 reasons.append(f"Low volume ({vol_ratio:.1f}x average)")
 
+    # VWAP Institutional Anchoring
+    if "volume" in df.columns:
+        try:
+            vwap_series = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+            if vwap_series is not None and len(vwap_series.dropna()) > 1:
+                curr_vwap = float(vwap_series.iloc[-1])
+                prev_vwap = float(vwap_series.iloc[-2])
+                curr_close = float(close.iloc[-1])
+                prev_close = float(close.iloc[-2])
+                indicators["vwap"] = curr_vwap
+
+                pct_from_vwap = (curr_close - curr_vwap) / curr_vwap * 100
+
+                if curr_close > curr_vwap and prev_close <= prev_vwap:
+                    direction += 1
+                    strength += 0.2
+                    reasons.append(f"VWAP Breakout (VWAP: {curr_vwap:.2f})")
+                elif curr_close > curr_vwap and pct_from_vwap < 1.0:
+                    strength += 0.1
+                    reasons.append(f"Price near VWAP (+{pct_from_vwap:.2f}%)")
+                elif curr_close > curr_vwap and pct_from_vwap >= 1.0:
+                    direction -= 1  # punish, institutions taking profit here
+                    reasons.append(f"Price extended above VWAP (+{pct_from_vwap:.2f}%)")
+                elif curr_close < curr_vwap:
+                    direction -= 1
+                    reasons.append(f"Price below VWAP (-{abs(pct_from_vwap):.2f}%)")
+        except Exception:
+            pass
+
     return TimeframeBias("15m", max(-1, min(1, direction)), min(strength, 1.0), reasons, indicators)
 
 
@@ -240,8 +298,27 @@ def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:
     hourly = analyze_hourly(frames.get("1h", pd.DataFrame()))
     quarter = analyze_15min(frames.get("15m", pd.DataFrame()))
 
-    confluence = daily.direction + hourly.direction + quarter.direction
+    # Time-of-Day Chop Filter (11:30 to 13:30 IST)
+    df_15 = frames.get("15m", pd.DataFrame())
+    time_penalty = 0
+    chop_reason = None
+    if not df_15.empty:
+        try:
+            last_time = df_15.index[-1]
+            hour = last_time.hour
+            minute = last_time.minute
+            time_in_mins = hour * 60 + minute
+            if 11 * 60 + 30 <= time_in_mins <= 13 * 60 + 30:
+                time_penalty = -1
+                chop_reason = "Mid-day Chop Filter (11:30-13:30) active"
+        except Exception:
+            pass
+
+    confluence = daily.direction + hourly.direction + quarter.direction + time_penalty
     all_reasons = daily.reasons + hourly.reasons + quarter.reasons
+    
+    if chop_reason:
+        all_reasons.append(chop_reason)
 
     # Regime-adaptive thresholds
     # V2.1: RANGING regime = no trades. Momentum strategies need a trend.

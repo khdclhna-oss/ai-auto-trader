@@ -23,6 +23,7 @@ from risk_manager import (
     calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS
 )
 from news import get_news_sentiment
+from alerts import send_telegram_alert
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -233,6 +234,16 @@ def run():
                     print(f"  │  🟢 EXECUTING BUY: {plan.quantity} shares @ ₹{price:.2f}")
                     print(f"  │     SL: ₹{plan.stop_loss:.2f} | TP: ₹{plan.target:.2f} | RR: {plan.reward_risk_ratio:.1f}")
 
+                    send_telegram_alert(
+                        f"🚨 <b>BUY EXECUTED: {short_name}</b>\n\n"
+                        f"Quantity: {plan.quantity}\n"
+                        f"Entry: ₹{price:.2f}\n"
+                        f"Stop Loss: ₹{plan.stop_loss:.2f}\n"
+                        f"Target: ₹{plan.target:.2f}\n"
+                        f"Confluence: +{effective_score}\n"
+                        f"Reason: {reason_str}"
+                    )
+
                     cur.execute("""
                         INSERT INTO open_positions (stock, quantity, entry_price, stop_loss, target, entry_time, reason)
                         VALUES (%s, %s, %s, %s, %s, NOW(), %s)
@@ -262,6 +273,14 @@ def run():
                     qty, entry, sl = int(pos[0]), float(pos[1]), float(pos[2])
                     pnl = (price - entry) * qty
                     print(f"  │  🔴 EXECUTING SELL: {qty} shares @ ₹{price:.2f} | P&L: ₹{pnl:+.2f}")
+
+                    send_telegram_alert(
+                        f"🔴 <b>SELL EXECUTED: {short_name}</b>\n\n"
+                        f"Quantity: {qty}\n"
+                        f"Entry: ₹{entry:.2f}\n"
+                        f"Exit: ₹{price:.2f}\n"
+                        f"P&L: ₹{pnl:+.2f} ({((price-entry)/entry)*100:+.2f}%)"
+                    )
 
                     cur.execute("""
                         UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
@@ -327,6 +346,13 @@ def run():
             if current_price >= target:
                 pnl = (current_price - entry) * qty
                 print(f"  🎯 {short}: Target hit @ ₹{current_price:.2f} | P&L: +₹{pnl:.2f}")
+                send_telegram_alert(
+                    f"🎯 <b>TARGET HIT: {short}</b>\n\n"
+                    f"Quantity: {qty}\n"
+                    f"Entry: ₹{entry:.2f}\n"
+                    f"Exit: ₹{current_price:.2f}\n"
+                    f"P&L: ₹{pnl:+.2f} ({((current_price-entry)/entry)*100:+.2f}%)"
+                )
                 cur.execute("""
                     UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
                     WHERE stock=%s AND status='OPEN'
@@ -345,6 +371,14 @@ def run():
             if trail.should_close:
                 pnl = (current_price - entry) * qty
                 print(f"  🛑 {short}: Stop hit @ ₹{current_price:.2f} | P&L: ₹{pnl:+.2f}")
+                send_telegram_alert(
+                    f"🛑 <b>STOP HIT: {short}</b>\n\n"
+                    f"Quantity: {qty}\n"
+                    f"Entry: ₹{entry:.2f}\n"
+                    f"Exit: ₹{current_price:.2f}\n"
+                    f"P&L: ₹{pnl:+.2f} ({((current_price-entry)/entry)*100:+.2f}%)\n"
+                    f"Stop Trailed From: ₹{sl:.2f}"
+                )
                 cur.execute("""
                     UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED'
                     WHERE stock=%s AND status='OPEN'
@@ -398,6 +432,7 @@ def _safe_run():
         sys.stdout = sys.__stdout__  # emergency restore
         err = traceback.format_exc()
         print(f"\n💥 FATAL ERROR: {e}\n{err}")
+        send_telegram_alert(f"💥 <b>FATAL ERROR IN QUANTUMTRADER</b>\n\n<pre>{str(e)}</pre>")
         # Try to mark the run as errored
         try:
             conn = psycopg2.connect(DATABASE_URL)

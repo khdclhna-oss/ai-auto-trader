@@ -213,8 +213,8 @@ def score_bar(row, prev_row) -> tuple:
                 score -= 1
                 reasons.append("Extended>VWAP")
 
-    # V2.1: Tightened threshold — require full 3-point confluence
-    if score >= 3:
+    # V2.5: Tightened threshold — require strict multi-factor confluence
+    if score >= 4:
         action = "BUY"
     elif score <= -3:
         action = "SELL"

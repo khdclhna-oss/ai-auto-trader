@@ -330,9 +330,9 @@ def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:
             regime=regime, reasons=all_reasons + ["RANGING regime — no trades"],
         )
 
-    # TRENDING or VOLATILE: require all 3 timeframes aligned (score ≥ 3)
-    buy_threshold = 3    # All 3 TFs must be bullish
-    sell_threshold = -3  # All 3 TFs must be bearish
+    # TRENDING or VOLATILE: require all 3 timeframes aligned + strict confluence
+    buy_threshold = 4    # Need at least 4 confluence points
+    sell_threshold = -4  # Need at least -4 confluence points
 
     if confluence >= buy_threshold:
         action = "BUY"

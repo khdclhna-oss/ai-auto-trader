@@ -342,6 +342,11 @@ def run():
             current_price = float(df_15["close"].iloc[-1])
             atr = calculate_atr(df_15) or (current_price * 0.01)
 
+            # Get ADX for trailing stop decay
+            df_daily = frames.get("1d")
+            regime_result = detect_regime(df_daily if df_daily is not None and len(df_daily) > 50 else df_15)
+            adx_val = regime_result.adx
+
             # Check if target was hit
             if current_price >= target:
                 pnl = (current_price - entry) * qty
@@ -366,7 +371,7 @@ def run():
                 continue
 
             # Check trailing stop
-            trail = check_trailing_stop(stock, entry, current_price, sl, atr)
+            trail = check_trailing_stop(stock, entry, current_price, sl, atr, adx=adx_val)
 
             if trail.should_close:
                 pnl = (current_price - entry) * qty

@@ -17,7 +17,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, 
 
 type Portfolio = { capital: string|number; invested: string|number; cash: string|number; pnl: string|number; pnl_pct: string|number }
 type LiveTrade = { stock: string; entry_price: string|number; quantity: string|number; stop_loss: string|number; target: string|number; entry_time: string; reason: string }
-type TradeLog = { id: number; stock: string; action: string; entry_price: string|number; exit_price: string|number; pnl: string|number; reason: string; entry_time: string; status: string; confluence_score: number; regime: string }
+type TradeLog = { id: number; stock: string; action: string; entry_price: string|number; exit_price: string|number; pnl: string|number; reason: string; entry_time: string; status: string; confluence_score: number; regime: string; holding_period?: string; gross_profit?: number; taxes?: number; }
 type EquitySnap = { capital: string|number; snapshot_at: string }
 type Analytics = {
   totalTrades: number; winRate: number; profitFactor: number; netPnl: number;
@@ -301,9 +301,26 @@ export default function Dashboard() {
                           {t.confluence_score !== null && t.confluence_score !== undefined && (
                             <span className="text-xs text-slate-500">Confluence: {t.confluence_score > 0 ? '+' : ''}{t.confluence_score}</span>
                           )}
+                          
+                          {t.status === 'CLOSED' && t.gross_profit !== null && t.gross_profit !== undefined && (
+                            <>
+                              <span className="text-[10px] text-slate-400 border border-slate-700 bg-slate-800/50 px-2 py-0.5 rounded-md self-center">
+                                Gross: {t.gross_profit > 0 ? '+' : ''}₹{t.gross_profit.toFixed(2)}
+                              </span>
+                              <span className="text-[10px] text-red-400/80 border border-red-900/50 bg-red-900/10 px-2 py-0.5 rounded-md self-center">
+                                Tax: ₹{t.taxes?.toFixed(2)}
+                              </span>
+                              {t.holding_period && (
+                                <span className="text-[10px] text-cyan-400/80 border border-cyan-900/50 bg-cyan-900/10 px-2 py-0.5 rounded-md flex items-center gap-1 self-center">
+                                  <Clock className="w-3 h-3" /> {t.holding_period}
+                                </span>
+                              )}
+                            </>
+                          )}
+
                           {t.pnl && Number(t.pnl) !== 0 && (
-                            <span className={`text-sm font-bold ${Number(t.pnl) > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {Number(t.pnl) > 0 ? '+' : ''}₹{Number(t.pnl).toFixed(2)}
+                            <span className={`text-sm font-bold ${Number(t.pnl) > 0 ? 'text-emerald-400' : 'text-red-400'} ml-auto`}>
+                              {Number(t.pnl) > 0 ? 'Net +' : 'Net '}₹{Number(t.pnl).toFixed(2)}
                             </span>
                           )}
                         </div>

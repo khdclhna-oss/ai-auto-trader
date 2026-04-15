@@ -15,6 +15,35 @@ export async function GET() {
       WHERE status IN ('OPEN', 'CLOSED', 'SIGNAL')
       ORDER BY entry_time DESC LIMIT 50
     `)
-    return NextResponse.json(rows)
+    
+    const processedRows = rows.map(row => {
+      let holding_period = null
+      let gross_profit = null
+      let taxes = null
+      
+      if (row.entry_time && row.exit_time && row.status === 'CLOSED') {
+        const start = new Date(row.entry_time).getTime()
+        const end = new Date(row.exit_time).getTime()
+        const diffMs = end - start
+        
+        const days = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+        const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
+        const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60))
+        
+        if (days > 0) {
+            holding_period = `${days}d ${hours}h`
+        } else {
+            holding_period = `${hours}h ${minutes}m`
+        }
+        
+        gross_profit = (Number(row.exit_price) - Number(row.entry_price)) * Number(row.quantity)
+        if (row.action === 'SELL') gross_profit = -gross_profit
+        
+        taxes = gross_profit - Number(row.pnl || 0)
+      }
+      return { ...row, holding_period, gross_profit, taxes }
+    })
+    
+    return NextResponse.json(processedRows)
   } finally { client.release() }
 }

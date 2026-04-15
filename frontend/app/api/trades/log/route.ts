@@ -36,10 +36,12 @@ export async function GET() {
             holding_period = `${hours}h ${minutes}m`
         }
         
+        // [P2 FIX] gross_profit = (exit - entry) * qty is already correctly signed for long exits.
+        // Negating again when action === 'SELL' was inverting winners into losers in the UI.
         gross_profit = (Number(row.exit_price) - Number(row.entry_price)) * Number(row.quantity)
-        if (row.action === 'SELL') gross_profit = -gross_profit
         
-        taxes = gross_profit - Number(row.pnl || 0)
+        // Use DB charges column if available (written by calculator), else derive from gross - net
+        taxes = row.charges != null ? Number(row.charges) : gross_profit - Number(row.pnl || 0)
       }
       return { ...row, holding_period, gross_profit, taxes }
     })

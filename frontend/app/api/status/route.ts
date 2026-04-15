@@ -11,7 +11,7 @@ export async function GET() {
     const runs = await client.query(`
       SELECT id, started_at, finished_at, status, market_open,
              stocks_scanned, signals_fired, trades_executed,
-             error_message, duration_ms
+             error_message, duration_ms, log_lines
       FROM run_logs
       ORDER BY started_at DESC
       LIMIT 20

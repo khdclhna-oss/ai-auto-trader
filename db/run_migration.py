@@ -14,6 +14,7 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS regime VARCHAR(20);
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS atr_at_entry NUMERIC(12,4);
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS trailing_sl NUMERIC(12,2);
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS sentiment_score NUMERIC(4,2);
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS charges NUMERIC(12,4) DEFAULT 0;  -- [P0 FIX] was missing, written on every close
 
 -- Allow 'SIGNAL' status
 ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_status_check;

@@ -269,6 +269,18 @@ def run():
             if sentiment != 0:
                 effective_score += sentiment  # ±1 from news
 
+            # ─── [P0 FIX] Derive the final action from sentiment-adjusted score ───
+            # The pre-sentiment confluence.action is NEVER used for execution.
+            # This ensures bearish news can veto a BUY signal.
+            BUY_THRESHOLD = 4   # minimum score required to enter a long trade
+            SELL_THRESHOLD = -2  # sell if score drops this low on a held position
+            if effective_score >= BUY_THRESHOLD:
+                final_action = "BUY"
+            elif effective_score <= SELL_THRESHOLD:
+                final_action = "SELL"
+            else:
+                final_action = "HOLD"
+
             # Current price and ATR
             price = float(df_15["close"].iloc[-1])
             prev_close = float(df_15["close"].iloc[-2]) if len(df_15) >= 2 else price
@@ -285,26 +297,23 @@ def run():
             if atr is None:
                 atr = price * 0.01  # fallback: 1% of price
 
-            # Re-evaluate final action based on LLM-adjusted effective score
-            effective_action = "HOLD"
-            if effective_score >= 4:
-                effective_action = "BUY"
-            elif effective_score <= -4:
-                effective_action = "SELL"
-
-            # Build reason string
+            # Build reason string using the final sentiment-gated action
             reason_parts = confluence.reasons.copy()
             if sentiment > 0:
                 reason_parts.append("Positive news +1")
             elif sentiment < 0:
                 reason_parts.append("Negative news -1")
-            reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {effective_action}"
+            reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {final_action}"
+            print(f"  │  Final Decision: {final_action} (pre-sentiment: {confluence.action}, adjusted score: {effective_score:+d})")
 
-            # ─── 3. Execute trade decisions ───────────────
-            # LIQUIDITY CHECK: Ensure we aren't trading more than 10% of interval volume
+            # Track signals fired this run
+            if final_action != "HOLD":
+                signals_total += 1
+
+            # ─── 3. Execute trade decisions (using sentiment-gated final_action) ─
             last_volume = float(df_15["volume"].iloc[-1])
             
-            if effective_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS and cash > 0:
+            if final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS and cash > 0:
                 plan = plan_position(
                     stock=symbol,
                     entry_price=price,
@@ -356,7 +365,7 @@ def run():
                             cash -= cost
                             held_stocks.add(symbol)
 
-            elif effective_action == "SELL":
+            elif final_action == "SELL":
                 cur.execute("SELECT quantity, entry_price, stop_loss FROM open_positions WHERE stock = %s", (symbol,))
                 pos = cur.fetchone()
                 if pos:
@@ -387,13 +396,14 @@ def run():
                     """, (proceeds, entry * qty, pnl, pnl))
                     open_count -= 1
                     cash += proceeds
+                    trades_total += 1
 
-            # Always log the signal
+            # Always log the signal (use final_action, not pre-sentiment confluence.action)
             cur.execute("""
                 INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status,
                                     confluence_score, regime, atr_at_entry, sentiment_score)
                 VALUES (%s, %s, %s, 0, %s, NOW(), 'SIGNAL', %s, %s, %s, %s)
-            """, (symbol, confluence.action, price, reason_str,
+            """, (symbol, final_action, price, reason_str,
                   effective_score, regime_result.regime, atr, sentiment))
 
             # Log to signal_log table for analytics

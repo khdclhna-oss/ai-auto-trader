@@ -426,9 +426,9 @@ def run():
 
         print(f"  └{'─' * 50}\n")
 
-    # ─── 4. Manage trailing stops on open positions ───────────
+    # ─── 4. Manage trailing stops / intrabar exits on open positions ───
     print(f"  {'─' * 50}")
-    print(f"  Managing trailing stops...")
+    print(f"  Checking intrabar exits and trailing stops...")
     cur.execute("SELECT stock, quantity, entry_price, stop_loss, target FROM open_positions")
     positions = cur.fetchall()
 
@@ -442,82 +442,126 @@ def run():
             if df_15 is None or len(df_15) < 2:
                 continue
 
-            current_price = float(df_15["close"].iloc[-1])
-            atr = calculate_atr(df_15) or (current_price * 0.01)
+            # ─── INTRABAR EXECUTION MODEL (bar-level OHLC, not close-only) ───
+            # Improvements over close-only:
+            #   1. Stop out at stop_loss price if bar LOW breaches it
+            #   2. Fill target at target price if bar HIGH reaches it
+            #   3. Priority rule: if same bar hits both, stop wins (conservative)
+            #   4. Gap-slippage haircut if open already beyond trigger level
+            current_bar = df_15.iloc[-1]
+            bar_open   = float(current_bar["open"])
+            bar_high   = float(current_bar["high"])
+            bar_low    = float(current_bar["low"])
+            bar_close  = float(current_bar["close"])
+            GAP_SLIPPAGE = 0.001  # 0.1% extra haircut for gap-through cases
+
+            atr = calculate_atr(df_15) or (bar_close * 0.01)
 
             # Get ADX for trailing stop decay
             df_daily = frames.get("1d")
             regime_result = detect_regime(df_daily if df_daily is not None and len(df_daily) > 50 else df_15)
             adx_val = regime_result.adx
 
-            # Check if target was hit
-            if current_price >= target:
-                # Fix: Use Delivery Hardened charges
-                c = calculate_realistic_charges(entry, current_price, qty, is_intraday=False)
+            # Determine if stop or target was triggered this bar
+            stop_breached  = bar_low  <= sl
+            target_reached = bar_high >= target
+
+            # Priority rule: if SAME bar hits both, conservatively assume stop hit first
+            if stop_breached and target_reached:
+                print(f"  ⚠️ {short}: Both SL and TP hit same bar — conservative: stop wins")
+                target_reached = False
+
+            # ── TARGET HIT ──────────────────────────────────────────────────
+            if target_reached:
+                # Fill price: target level, but haircut if price gapped through it
+                fill_price = target
+                if bar_open >= target:
+                    # Opened above target — gap-up, assume partial slippage at open
+                    fill_price = bar_open * (1 - GAP_SLIPPAGE)
+                    print(f"  🎯 {short}: Gap-through target (open ₹{bar_open:.2f} > TP ₹{target:.2f}), fill ₹{fill_price:.2f}")
+                else:
+                    print(f"  🎯 {short}: Target reached ₹{target:.2f} (bar H: ₹{bar_high:.2f})")
+
+                c = calculate_realistic_charges(entry, fill_price, qty, is_intraday=False)
                 pnl = c.net_pnl
-                print(f"  🎯 {short}: Target hit @ ₹{current_price:.2f} | Net P&L: +₹{pnl:.2f}")
+                print(f"      Net P&L: +₹{pnl:.2f}")
                 send_telegram_alert(
                     f"🎯 <b>TARGET HIT: {short}</b>\n\n"
                     f"Quantity: {qty}\n"
                     f"Entry: ₹{entry:.2f}\n"
-                    f"Exit: ₹{current_price:.2f}\n"
+                    f"Exit (bar TP): ₹{fill_price:.2f}\n"
                     f"Taxes & Slippage: ₹{c.total:.2f}\n"
                     f"Net P&L: ₹{pnl:+.2f} ({c.net_pnl_pct:+.2f}%)"
                 )
                 cur.execute("""
                     UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s
                     WHERE stock=%s AND status='OPEN'
-                """, (current_price, pnl, c.total, stock))
+                """, (fill_price, pnl, c.total, stock))
                 cur.execute("DELETE FROM open_positions WHERE stock = %s", (stock,))
-                proceeds = current_price * qty - c.total
+                proceeds = fill_price * qty - c.total
                 cur.execute("""
                     UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
                                          capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
                 """, (proceeds, entry * qty, pnl, pnl))
+                trades_total += 1
                 continue
 
-            # STRATEGY: 📈 BREAK-EVEN TRIGGER
-            # If price moves +1.5% in favor, move SL to Entry Price
-            unrealized_pct = ((current_price - entry) / entry) * 100
-            if unrealized_pct >= 1.5 and sl < entry:
-                print(f"  🛡️ {short}: BREAK-EVEN TRIGGER! Moving SL: ₹{sl:.2f} → ₹{entry:.2f}")
-                sl = entry
-                cur.execute("UPDATE open_positions SET stop_loss = %s WHERE stock = %s", (entry, stock))
+            # BREAK-EVEN TRIGGER (only if stop not hit this bar)
+            if not stop_breached:
+                unrealized_pct = ((bar_close - entry) / entry) * 100
+                if unrealized_pct >= 1.5 and sl < entry:
+                    print(f"  🛡️ {short}: BREAK-EVEN TRIGGER! Moving SL: ₹{sl:.2f} → ₹{entry:.2f}")
+                    sl = entry
+                    cur.execute("UPDATE open_positions SET stop_loss = %s WHERE stock = %s", (entry, stock))
 
-            # Check trailing stop
-            trail = check_trailing_stop(stock, entry, current_price, sl, atr, adx=adx_val)
+            # Check trailing stop (pass bar_close as reference price)
+            trail = check_trailing_stop(stock, entry, bar_close, sl, atr, adx=adx_val)
 
-            if trail.should_close:
-                # Fix: Use Delivery Hardened charges
-                c = calculate_realistic_charges(entry, current_price, qty, is_intraday=False)
+            # ── STOP HIT ────────────────────────────────────────────────────
+            if stop_breached or trail.should_close:
+                # Fill price: stop level, but haircut if price gapped below it
+                if stop_breached:
+                    if bar_open <= sl:
+                        # Opened below stop — gap-down, fill at open with extra haircut
+                        fill_price = bar_open * (1 - GAP_SLIPPAGE)
+                        print(f"  🛑 {short}: Gap-through stop (open ₹{bar_open:.2f} < SL ₹{sl:.2f}), fill ₹{fill_price:.2f}")
+                    else:
+                        fill_price = sl  # Intrabar breach — fill at stop level
+                        print(f"  🛑 {short}: Stop breached (bar L: ₹{bar_low:.2f} <= SL ₹{sl:.2f}), fill ₹{fill_price:.2f}")
+                else:
+                    fill_price = bar_close  # Trailing logic triggered, fill at close
+                    print(f"  🛑 {short}: Trailing stop hit @ close ₹{fill_price:.2f}")
+
+                c = calculate_realistic_charges(entry, fill_price, qty, is_intraday=False)
                 pnl = c.net_pnl
-                print(f"  🛑 {short}: Stop hit @ ₹{current_price:.2f} | Net P&L: ₹{pnl:+.2f}")
+                print(f"      Net P&L: ₹{pnl:+.2f}")
                 send_telegram_alert(
                     f"🛑 <b>STOP HIT: {short}</b>\n\n"
                     f"Quantity: {qty}\n"
                     f"Entry: ₹{entry:.2f}\n"
-                    f"Exit: ₹{current_price:.2f}\n"
+                    f"Exit (bar SL): ₹{fill_price:.2f}\n"
                     f"Taxes & Slippage: ₹{c.total:.2f}\n"
                     f"Net P&L: ₹{pnl:+.2f} ({c.net_pnl_pct:+.2f}%)\n"
-                    f"Stop Trailed From: ₹{trail.old_sl if hasattr(trail, 'old_sl') else sl:.2f}"
+                    f"Stop Level: ₹{sl:.2f}"
                 )
                 cur.execute("""
                     UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s
                     WHERE stock=%s AND status='OPEN'
-                """, (current_price, pnl, c.total, stock))
+                """, (fill_price, pnl, c.total, stock))
                 cur.execute("DELETE FROM open_positions WHERE stock = %s", (stock,))
-                proceeds = current_price * qty - c.total
+                proceeds = fill_price * qty - c.total
                 cur.execute("""
                     UPDATE portfolio SET cash = cash + %s, invested = invested - %s,
                                          capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
                 """, (proceeds, entry * qty, pnl, pnl))
-            elif trail.should_update:
+                trades_total += 1
+            elif not stop_breached and trail.should_update:
                 print(f"  📈 {short}: Trailing stop moved ₹{sl:.2f} → ₹{trail.new_stop:.2f}")
                 cur.execute("""
                     UPDATE open_positions SET stop_loss = %s WHERE stock = %s
                 """, (trail.new_stop, stock))
             else:
-                print(f"  ⏳ {short}: Holding @ ₹{current_price:.2f} (P&L: ₹{trail.unrealized_pnl:+.2f})")
+                print(f"  ⏳ {short}: Holding @ ₹{bar_close:.2f} (Unrealized: ₹{trail.unrealized_pnl:+.2f})")
 
         except Exception as e:
             print(f"  ❌ Error managing {short}: {e}")

@@ -45,7 +45,7 @@ INITIAL_CAPITAL = 100000
 RISK_PER_TRADE = 0.02
 ATR_SL_MULT = 2.0
 ATR_TP_MULT = 4.0    # V2.1: widened from 3x → 4x ATR for better RR
-MAX_POSITIONS = 3
+MAX_POSITIONS = 10   # synced with live engine
 
 
 @dataclass

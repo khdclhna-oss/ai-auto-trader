@@ -24,7 +24,7 @@ ATR_SL_MULTIPLIER = 2.0  # stop = entry - 2*ATR
 ATR_TP_MULTIPLIER = 4.0  # target = entry + 4*ATR  (↑ from 3x → better RR)
 TRAIL_ACTIVATION = 2.0   # activate trailing after 2*ATR profit (gives trade room)
 TRAIL_DISTANCE = 1.0     # trail stop by 1*ATR once activated
-MAX_POSITIONS = 3         # max simultaneous positions
+MAX_POSITIONS = 10        # max simultaneous positions (synced with live engine)
 
 
 @dataclass

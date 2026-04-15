@@ -214,6 +214,12 @@ def run():
 
     print(f"  Portfolio: ₹{capital:,.0f} | Cash: ₹{cash:,.0f} | Invested: ₹{invested:,.0f}")
     print(f"  Open positions: {open_count}/{MAX_POSITIONS}\n")
+    
+    # Clamp cash to 0 if negative (DB corruption guard)
+    if cash < 0:
+        print(f"  ⚠️ CASH GUARD: Resetting negative cash to Rs 0 (was ₹{cash:,.0f})")
+        cash = 0
+        cur.execute("UPDATE portfolio SET cash = 0 WHERE cash < 0")
 
     # ─── 2. Batch Fetch Universe Data ──────────────────────────
     universe_data = fetch_batch_universe(STOCKS)
@@ -265,6 +271,16 @@ def run():
 
             # Current price and ATR
             price = float(df_15["close"].iloc[-1])
+            prev_close = float(df_15["close"].iloc[-2]) if len(df_15) >= 2 else price
+            
+            # 🚨 PRICE SANITY CHECK: Reject if price moved >20% from previous bar
+            # This prevents acting on bad/stale/split-adjusted data (e.g. HDFC anomaly)
+            price_chg_pct = abs((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
+            if price_chg_pct > 20:
+                print(f"  │  🚨 PRICE ANOMALY DETECTED: {short_name} moved {price_chg_pct:.1f}% in one bar (₹{prev_close:.2f} → ₹{price:.2f}) — SKIPPING")
+                print(f"  └{'─' * 50}\n")
+                continue
+            
             atr = calculate_atr(df_15)
             if atr is None:
                 atr = price * 0.01  # fallback: 1% of price
@@ -293,42 +309,45 @@ def run():
                 if plan and plan.quantity > 0:
                     # Realistic Penalty: Reject if quantity is too high for the interval
                     if plan.quantity > last_volume * 0.1:
-                        print(f"  │  ⚠ BUY REJECTED: Low Liquidity ({plan.quantity} qty vs {last_volume} vol)")
-                    elif price * plan.quantity <= cash:
-                        print(f"  │  🟢 EXECUTING BUY: {plan.quantity} shares @ ₹{price:.2f}")
-                        print(f"  │     SL: ₹{plan.stop_loss:.2f} | TP: ₹{plan.target:.2f} | RR: {plan.reward_risk_ratio:.1f}")
+                        print(f"  │  ⚠ BUY REJECTED: Low Liquidity ({plan.quantity} qty vs {last_volume:.0f} vol)")
+                    else:
+                        cost = price * plan.quantity
+                        # 🛡️ HARD CASH GUARD: Never go into negative cash
+                        if cost > cash:
+                            print(f"  │  ⚠ BUY REJECTED: Insufficient cash (₹{cost:,.0f} needed, only ₹{cash:,.0f} available)")
+                        else:
+                            print(f"  │  🟢 EXECUTING BUY: {plan.quantity} shares @ ₹{price:.2f}")
+                            print(f"  │     SL: ₹{plan.stop_loss:.2f} | TP: ₹{plan.target:.2f} | RR: {plan.reward_risk_ratio:.1f}")
 
-                    send_telegram_alert(
-                        f"🚨 <b>BUY EXECUTED: {short_name}</b>\n\n"
-                        f"Quantity: {plan.quantity}\n"
-                        f"Entry: ₹{price:.2f}\n"
-                        f"Stop Loss: ₹{plan.stop_loss:.2f}\n"
-                        f"Target: ₹{plan.target:.2f}\n"
-                        f"Confluence: +{effective_score}\n"
-                        f"Reason: {reason_str}"
-                    )
+                            send_telegram_alert(
+                                f"🚨 <b>BUY EXECUTED: {short_name}</b>\n\n"
+                                f"Quantity: {plan.quantity}\n"
+                                f"Entry: ₹{price:.2f}\n"
+                                f"Stop Loss: ₹{plan.stop_loss:.2f}\n"
+                                f"Target: ₹{plan.target:.2f}\n"
+                                f"Confluence: +{effective_score}\n"
+                                f"Reason: {reason_str}"
+                            )
 
-                    cur.execute("""
-                        INSERT INTO open_positions (stock, quantity, entry_price, stop_loss, target, entry_time, reason)
-                        VALUES (%s, %s, %s, %s, %s, NOW(), %s)
-                        ON CONFLICT (stock) DO NOTHING
-                    """, (symbol, plan.quantity, price, plan.stop_loss, plan.target, reason_str))
+                            cur.execute("""
+                                INSERT INTO open_positions (stock, quantity, entry_price, stop_loss, target, entry_time, reason)
+                                VALUES (%s, %s, %s, %s, %s, NOW(), %s)
+                                ON CONFLICT (stock) DO NOTHING
+                            """, (symbol, plan.quantity, price, plan.stop_loss, plan.target, reason_str))
 
-                    cur.execute("""
-                        INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status,
-                                            confluence_score, regime, atr_at_entry, sentiment_score)
-                        VALUES (%s, 'BUY', %s, %s, %s, NOW(), 'OPEN', %s, %s, %s, %s)
-                    """, (symbol, price, plan.quantity, reason_str,
-                          effective_score, regime_result.regime, atr, sentiment))
+                            cur.execute("""
+                                INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status,
+                                                    confluence_score, regime, atr_at_entry, sentiment_score)
+                                VALUES (%s, 'BUY', %s, %s, %s, NOW(), 'OPEN', %s, %s, %s, %s)
+                            """, (symbol, price, plan.quantity, reason_str,
+                                  effective_score, regime_result.regime, atr, sentiment))
 
-                    cost = price * plan.quantity
-                    cur.execute("""
-                        UPDATE portfolio SET cash = cash - %s, invested = invested + %s, updated_at = NOW()
-                    """, (cost, cost))
-                    open_count += 1
-                    cash -= cost
-                else:
-                    print(f"  │  ⚠ BUY signal but position plan rejected (insufficient funds or bad RR)")
+                            cur.execute("""
+                                UPDATE portfolio SET cash = cash - %s, invested = invested + %s, updated_at = NOW()
+                            """, (cost, cost))
+                            open_count += 1
+                            cash -= cost
+                            held_stocks.add(symbol)
 
             elif confluence.action == "SELL":
                 cur.execute("SELECT quantity, entry_price, stop_loss FROM open_positions WHERE stock = %s", (symbol,))

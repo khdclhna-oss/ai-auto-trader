@@ -285,19 +285,26 @@ def run():
             if atr is None:
                 atr = price * 0.01  # fallback: 1% of price
 
+            # Re-evaluate final action based on LLM-adjusted effective score
+            effective_action = "HOLD"
+            if effective_score >= 4:
+                effective_action = "BUY"
+            elif effective_score <= -4:
+                effective_action = "SELL"
+
             # Build reason string
             reason_parts = confluence.reasons.copy()
             if sentiment > 0:
                 reason_parts.append("Positive news +1")
             elif sentiment < 0:
                 reason_parts.append("Negative news -1")
-            reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {confluence.action}"
+            reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {effective_action}"
 
             # ─── 3. Execute trade decisions ───────────────
             # LIQUIDITY CHECK: Ensure we aren't trading more than 10% of interval volume
             last_volume = float(df_15["volume"].iloc[-1])
             
-            if confluence.action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS and cash > 0:
+            if effective_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS and cash > 0:
                 plan = plan_position(
                     stock=symbol,
                     entry_price=price,
@@ -349,7 +356,7 @@ def run():
                             cash -= cost
                             held_stocks.add(symbol)
 
-            elif confluence.action == "SELL":
+            elif effective_action == "SELL":
                 cur.execute("SELECT quantity, entry_price, stop_loss FROM open_positions WHERE stock = %s", (symbol,))
                 pos = cur.fetchone()
                 if pos:

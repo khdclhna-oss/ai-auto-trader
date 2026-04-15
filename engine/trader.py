@@ -27,6 +27,7 @@ MAX_POSITIONS = 10  # Scaled for 100 stocks
 from calculator import calculate_realistic_charges
 from sentiment_llm import get_llm_sentiment
 from alerts import send_telegram_alert
+from signals import evaluate_signal, _default_sentiment  # shared signal logic
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -244,75 +245,45 @@ def run():
                 print(f"  └{'─' * 50}\n")
                 continue
 
-            # Detect market regime from daily data
-            regime_result = detect_regime(df_daily if df_daily is not None and len(df_daily) > 50 else df_15)
-            print(f"  │  Regime: {regime_result.regime} (ADX: {regime_result.adx:.1f})")
+            # ─── 2+3. Evaluate signal using shared signals.py ───────────────
+            # evaluate_signal() contains: regime, confluence, sentiment,
+            # price sanity check, P0-fixed sentiment-gated final_action,
+            # and position plan — identical to what backtest.py uses.
+            sig = evaluate_signal(
+                symbol=symbol, frames=frames,
+                capital=capital, cash=cash,
+                held_stocks=held_stocks,
+                sentiment_fn=_default_sentiment,
+                open_count=open_count,
+                max_positions=MAX_POSITIONS,
+            )
 
-            # Get multi-timeframe confluence
-            confluence = get_confluence(symbol, frames, regime_result.regime)
-            print(f"  │  Confluence: {confluence.confluence_score:+d} → {confluence.action}")
-            for r in confluence.reasons:
-                print(f"  │    • {r}")
-
-            # Get qualitative sentiment (LLM 2.0)
-            sentiment_score = get_llm_sentiment(symbol)
-            # Normalize: if LLM says > 0.3, add +1 to score; if < -0.3, sub 1
-            sentiment = 0
-            if sentiment_score > 0.3: sentiment = 1
-            if sentiment_score < -0.3: sentiment = -1
-            
-            sentiment_str = {1: "Positive", -1: "Negative", 0: "Neutral"}[sentiment]
-            print(f"  │  LLM News: {sentiment_str} ({sentiment_score:+.2f})")
-
-            # Adjust confluence with sentiment
-            effective_score = confluence.confluence_score
-            if sentiment != 0:
-                effective_score += sentiment  # ±1 from news
-
-            # ─── [P0 FIX] Derive the final action from sentiment-adjusted score ───
-            # The pre-sentiment confluence.action is NEVER used for execution.
-            # This ensures bearish news can veto a BUY signal.
-            BUY_THRESHOLD = 4   # minimum score required to enter a long trade
-            SELL_THRESHOLD = -2  # sell if score drops this low on a held position
-            if effective_score >= BUY_THRESHOLD:
-                final_action = "BUY"
-            elif effective_score <= SELL_THRESHOLD:
-                final_action = "SELL"
-            else:
-                final_action = "HOLD"
-
-            # Current price and ATR
-            price = float(df_15["close"].iloc[-1])
-            prev_close = float(df_15["close"].iloc[-2]) if len(df_15) >= 2 else price
-            
-            # 🚨 PRICE SANITY CHECK: Reject if price moved >20% from previous bar
-            # This prevents acting on bad/stale/split-adjusted data (e.g. HDFC anomaly)
-            price_chg_pct = abs((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
-            if price_chg_pct > 20:
-                print(f"  │  🚨 PRICE ANOMALY DETECTED: {short_name} moved {price_chg_pct:.1f}% in one bar (₹{prev_close:.2f} → ₹{price:.2f}) — SKIPPING")
+            if sig.skipped:
+                print(f"  │  ⚠ Skipped: {sig.reason_str}")
                 print(f"  └{'─' * 50}\n")
                 continue
-            
-            atr = calculate_atr(df_15)
-            if atr is None:
-                atr = price * 0.01  # fallback: 1% of price
 
-            # Build reason string using the final sentiment-gated action
-            reason_parts = confluence.reasons.copy()
-            if sentiment > 0:
-                reason_parts.append("Positive news +1")
-            elif sentiment < 0:
-                reason_parts.append("Negative news -1")
-            reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {final_action}"
-            print(f"  │  Final Decision: {final_action} (pre-sentiment: {confluence.action}, adjusted score: {effective_score:+d})")
+            final_action   = sig.final_action
+            effective_score = sig.effective_score
+            price          = sig.price
+            atr            = sig.atr
+            reason_str     = sig.reason_str
+            plan           = sig.plan
+            sentiment      = sig.sentiment
+            sentiment_score = sig.sentiment_score
 
-            # Track signals fired this run
+            sentiment_str = {1: "Positive", -1: "Negative", 0: "Neutral"}[sentiment]
+            print(f"  │  Regime: {sig.regime}")
+            print(f"  │  Confluence: {sig.confluence_score:+d} | Sentiment: {sentiment_str} ({sentiment_score:+.2f}) | Adjusted: {effective_score:+d}")
+            print(f"  │  Final Decision: {final_action}")
+            print(f"  │  Reason: {reason_str[:120]}")
+
             if final_action != "HOLD":
                 signals_total += 1
 
-            # ─── 3. Execute trade decisions (using sentiment-gated final_action) ─
-            last_volume = float(df_15["volume"].iloc[-1])
-            
+            # ─── Execute ───────────────────────────────────────────────────────
+            last_volume = float(df_15["volume"].iloc[-1]) if df_15 is not None and len(df_15) > 0 else 0
+
             if final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS and cash > 0:
                 plan = plan_position(
                     stock=symbol,

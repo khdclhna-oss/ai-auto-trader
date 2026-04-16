@@ -19,7 +19,8 @@ import pandas as pd
 # Allow importing sibling modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from multi_timeframe import get_confluence, detect_regime
+from multi_timeframe import get_confluence
+from regime import detect_regime
 from risk_manager import plan_position
 
 # ─── Constants (single source of truth, synced with trader.py) ────────────────

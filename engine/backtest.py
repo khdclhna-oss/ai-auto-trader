@@ -59,11 +59,7 @@ STOCKS = [
     "BAJAJHLDNG.NS",
 ]
 INITIAL_CAPITAL = 100_000
-RISK_PER_TRADE  = 0.02
-ATR_SL_MULT     = 2.0
-ATR_TP_MULT     = 4.0
-MAX_POSITIONS   = 10  # synced with live engine
-
+from risk_manager import MAX_POSITIONS, TRAIL_DISTANCE, TRAIL_ACTIVATION
 
 # ── Data structures ──────────────────────────────────────────────────────────
 @dataclass
@@ -293,21 +289,18 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                 if unr_pct >= 1.5 and pos["sl"] < pos["entry"]:
                     pos["sl"] = pos["entry"]
 
-                # Trailing stop
+                # Trailing stop using synced risk_manager constants
                 unrealized = price_now - pos["entry"]
-                if unrealized > 1.5 * atr_val:
-                    adx_v = float(row["adx"]) if "adx" in row.index else 20
-                    trail_dist = 0.5 if adx_v < 25 else 1.0
-                    new_sl = max(pos["sl"], price_now - trail_dist * atr_val)
+                if unrealized > TRAIL_ACTIVATION * atr_val:
+                    new_sl = max(pos["sl"], price_now - TRAIL_DISTANCE * atr_val)
                     pos["sl"] = new_sl
 
             # ── Build frames dict based on fidelity ───────────────────────────
-            # For DEGRADED (daily-only) we pass only the daily slice.
-            # For FULL we construct a synthetic frames dict from the daily df
-            # so evaluate_signal can still run the same confluence logic.
-            # (Real intraday frames are fetched for live; here daily is the proxy.)
+            # Currently acting as a DAILY_PROXY for the intraday engine
+            # since downloading true 60d of 15m/1h across 100 stocks is too slow for backtesting.
             daily_slice = df_daily.loc[:date].tail(250)
             frames = {"1d": daily_slice, "15m": daily_slice, "1h": daily_slice}
+            fidelity = "DAILY_PROXY"
 
             # ── Evaluate signal ───────────────────────────────────────────────
             result = evaluate_signal(

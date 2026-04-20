@@ -21,9 +21,8 @@ from multi_timeframe import fetch_multi_timeframe, get_confluence
 from regime import detect_regime
 from tenacity import retry, wait_fixed, stop_after_attempt
 from risk_manager import (
-    calculate_atr, plan_position, check_trailing_stop
+    calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS
 )
-MAX_POSITIONS = 10  # Scaled for 100 stocks
 from calculator import calculate_realistic_charges
 from sentiment_llm import get_llm_sentiment
 from alerts import send_telegram_alert
@@ -285,14 +284,6 @@ def run():
             last_volume = float(df_15["volume"].iloc[-1]) if df_15 is not None and len(df_15) > 0 else 0
 
             if final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS and cash > 0:
-                plan = plan_position(
-                    stock=symbol,
-                    entry_price=price,
-                    atr=atr,
-                    capital=capital,
-                    regime=regime_result.regime,
-                )
-
                 if plan and plan.quantity > 0:
                     # Realistic Penalty: Reject if quantity is too high for the interval
                     if plan.quantity > last_volume * 0.1:

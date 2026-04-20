@@ -61,15 +61,12 @@ def detect_regime(df: pd.DataFrame) -> RegimeResult:
     if atr_pctl > 80:
         regime = "VOLATILE"
         desc = f"High volatility regime (ATR {atr_pctl:.0f}th percentile). Position sizes halved."
-    elif adx_val > 25:
+    elif adx_val >= 25:
         regime = "TRENDING"
         desc = f"Strong trend detected (ADX: {adx_val:.1f}). Momentum strategies active."
-    elif adx_val < 20:
-        regime = "RANGING"
-        desc = f"Range-bound market (ADX: {adx_val:.1f}). Mean-reversion mode."
     else:
-        regime = "TRENDING"  # weak trend, still favor momentum
-        desc = f"Weak trend (ADX: {adx_val:.1f}). Cautious momentum mode."
+        regime = "RANGING"
+        desc = f"Weak trend or range-bound (ADX: {adx_val:.1f}). Force skip to conserve capital."
 
     return RegimeResult(
         regime=regime,

@@ -60,11 +60,17 @@ def calculate_realistic_charges(entry_price: float, exit_price: float, qty: int,
     else:
         stamp_duty = buy_val * 0.00015
         
-    # 7. Slippage (Institutional Hardening)
+    # 7. DP Charges (Only on Sell side for Delivery)
+    if is_intraday:
+        dp_charges = 0.0
+    else:
+        dp_charges = 15.93  # ₹13.50 + 18% GST flat per stock when leaving Demat
+        
+    # 8. Slippage (Institutional Hardening)
     # Applied to both Buy (entry higher) and Sell (exit lower)
     slippage = total_val * slippage_pct
     
-    total_charges = brokerage + stt + exchange_txn + sebi + gst + stamp_duty + slippage
+    total_charges = brokerage + stt + exchange_txn + sebi + gst + stamp_duty + dp_charges + slippage
     
     gross_pnl = sell_val - buy_val
     net_pnl = gross_pnl - total_charges

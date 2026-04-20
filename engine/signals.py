@@ -33,8 +33,8 @@ GAP_SLIPPAGE   = 0.001  # 0.1% extra fill haircut for gap-through exits
 def _default_sentiment(symbol: str) -> float:
     """Real-time Gemini LLM sentiment. Used in live trading only."""
     try:
-        from sentiment_llm import get_sentiment_score
-        return get_sentiment_score(symbol)
+        from sentiment_llm import get_llm_sentiment
+        return get_llm_sentiment(symbol)
     except Exception:
         return 0.0
 
@@ -101,7 +101,7 @@ def evaluate_signal(
     regime_result = detect_regime(regime_src)
 
     # ── Step 2: Multi-timeframe confluence ────────────────────────────────────
-    confluence = get_confluence(symbol, frames)
+    confluence = get_confluence(symbol, frames, regime_result.regime)
 
     # ── Step 3: Sentiment-adjusted score ─────────────────────────────────────
     sentiment_score = sentiment_fn(symbol)

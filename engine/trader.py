@@ -318,7 +318,7 @@ def run():
                                                     confluence_score, regime, atr_at_entry, sentiment_score)
                                 VALUES (%s, 'BUY', %s, %s, %s, NOW(), 'OPEN', %s, %s, %s, %s)
                             """, (symbol, price, plan.quantity, reason_str,
-                                  effective_score, regime_result.regime, atr, sentiment))
+                                  effective_score, sig.regime, atr, sentiment))
 
                             cur.execute("""
                                 UPDATE portfolio SET cash = cash - %s, invested = invested + %s, updated_at = NOW()

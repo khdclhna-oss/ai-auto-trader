@@ -233,6 +233,7 @@ def run():
                                 (proceeds, ent * qty, c.net_pnl, c.net_pnl))
                     open_count -= 1; cash += proceeds; held_stocks.discard(symbol); trades_total += 1
         except Exception as e:
+            conn.rollback()
             print(f"  ❌ Error {short_name}: {e}")
 
     # ─── 2. Manage Open Positions (Intrabar + Trailing) ──────────
@@ -272,7 +273,9 @@ def run():
             if upd.should_update:
                 cur.execute("UPDATE open_positions SET stop_loss = %s WHERE stock = %s", (upd.new_stop, stock))
                 cur.execute("UPDATE trades SET trailing_sl = %s WHERE stock = %s AND status = 'OPEN'", (upd.new_stop, stock))
-        except Exception as e: print(f"  ❌ Exit err {stock}: {e}")
+        except Exception as e:
+            conn.rollback()
+            print(f"  ❌ Exit err {stock}: {e}")
 
     # ─── 3. Finalize ──────────────────────────
     cur.execute("INSERT INTO equity_snapshots (capital, cash, invested) SELECT capital, cash, invested FROM portfolio ORDER BY updated_at DESC LIMIT 1")

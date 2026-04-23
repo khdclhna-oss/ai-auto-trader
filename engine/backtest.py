@@ -2,15 +2,15 @@
 QuantumTrader V3 — Backtesting Framework
 ==========================================
 Calls the SAME evaluate_signal() and apply_intrabar_exit() functions
-as the live engine (trader.py), ensuring backtest results faithfully
-represent production behaviour.
+as the live engine (trader.py), but currently feeds daily candles as a
+proxy for the hourly and 15-minute inputs.
 
 Fidelity modes
 --------------
-  FULL      daily + hourly + 15m available  (last ~60 days from yfinance)
-  DEGRADED  daily candles only              (older periods)
+  DAILY_PROXY  daily candles proxied into 1d / 1h / 15m frames
 
-Each mode is reported separately. Metrics are NEVER blended.
+This keeps the signal path unified while being honest about current data
+fidelity. It is useful for rough comparison, not intraday-grade validation.
 
 Usage
 -----
@@ -23,7 +23,6 @@ import os
 import sys
 import math
 import argparse
-from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 
@@ -33,7 +32,7 @@ import pandas_ta as ta
 
 # ── Sibling imports ─────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from signals import evaluate_signal, apply_intrabar_exit, _neutral_sentiment, BUY_THRESHOLD
+from signals import evaluate_signal, apply_intrabar_exit, _neutral_sentiment
 from calculator import calculate_realistic_charges
 
 # ── Universe ─────────────────────────────────────────────────────────────────
@@ -75,14 +74,14 @@ class BacktestTrade:
     exit_time: object
     note: str
     hold_bars: int = 0
-    fidelity: str = "FULL"   # FULL or DEGRADED
+    fidelity: str = "DAILY_PROXY"
     confluence: float = 0.0
     sentiment: float = 0.0
 
 
 @dataclass
 class SegmentMetrics:
-    """Metrics for one fidelity segment (FULL or DEGRADED)."""
+    """Metrics for one reported fidelity segment."""
     fidelity: str
     period_start: str
     period_end: str
@@ -109,6 +108,7 @@ class BacktestResult:
     period_end: str
     all_trades: List[BacktestTrade] = field(default_factory=list)
     equity_curve: List[float] = field(default_factory=list)
+    proxy: Optional[SegmentMetrics] = None
     full: Optional[SegmentMetrics] = None
     degraded: Optional[SegmentMetrics] = None
 
@@ -177,7 +177,11 @@ def _grade(sharpe: float) -> str:
 
 def _print_segment(seg: SegmentMetrics):
     label = seg.fidelity
-    warn  = "  ⚠ daily-only" if label == "DEGRADED" else ""
+    warn = ""
+    if label == "DAILY_PROXY":
+        warn = "  ⚠ daily candles proxied into intraday frames"
+    elif label == "DEGRADED":
+        warn = "  ⚠ daily-only"
     print(f"\n  ── {label} MODE{warn} ────────────────────────────────")
     print(f"  Period:        {seg.period_start} → {seg.period_end}")
     print(f"  Trades:        {seg.total_trades}  ({seg.wins}W / {seg.losses}L)")
@@ -194,14 +198,12 @@ def _print_segment(seg: SegmentMetrics):
 
 # ── Core backtest ─────────────────────────────────────────────────────────────
 def run_backtest(period: str = "2y") -> BacktestResult:
-    now = datetime.now(tz=timezone.utc)
-    # yfinance gives ~60d of 1h and ~7d of 15m → anything within ~55 days is FULL
-    full_cutoff = now - timedelta(days=55)
+    # Current implementation runs in DAILY_PROXY mode only.
 
     print(f"\n{'='*65}")
-    print(f"  QuantumTrader V3 — Unified Backtest (signals.py parity)")
+    print(f"  QuantumTrader V3 — Unified Backtest (DAILY_PROXY mode)")
     print(f"  Period: {period} | Stocks: {len(STOCKS)} | Capital: ₹{INITIAL_CAPITAL:,}")
-    print(f"  FULL mode for dates after {full_cutoff.strftime('%Y-%m-%d')}")
+    print(f"  Mode: DAILY_PROXY (daily bars reused for 1d / 1h / 15m inputs)")
     print(f"{'='*65}\n")
 
     capital = INITIAL_CAPITAL
@@ -211,8 +213,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
     equity_curve = [INITIAL_CAPITAL]
     prev_equity  = INITIAL_CAPITAL
 
-    full_daily_returns:     List[float] = []
-    degraded_daily_returns: List[float] = []
+    proxy_daily_returns: List[float] = []
 
     # ── Fetch data ────────────────────────────────────────────────────────────
     daily_data: dict = {}   # symbol -> daily df
@@ -246,14 +247,6 @@ def run_backtest(period: str = "2y") -> BacktestResult:
     # ── Day-by-day simulation ─────────────────────────────────────────────────
     for i, date in enumerate(sorted_dates[1:], 1):
         prev_date = sorted_dates[i - 1]
-
-        # Determine fidelity for this bar's date
-        try:
-            date_aware = date.to_pydatetime().replace(tzinfo=timezone.utc) if hasattr(date, "to_pydatetime") else date
-        except Exception:
-            date_aware = date
-        is_full = date_aware >= full_cutoff
-        fidelity = "FULL" if is_full else "DEGRADED"
 
         for symbol, df_daily in daily_data.items():
             if date not in df_daily.index or prev_date not in df_daily.index:
@@ -355,10 +348,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
         capital = equity
 
         daily_ret = (equity - prev_equity) / prev_equity if prev_equity > 0 else 0
-        if fidelity == "FULL":
-            full_daily_returns.append(daily_ret)
-        else:
-            degraded_daily_returns.append(daily_ret)
+        proxy_daily_returns.append(daily_ret)
         prev_equity = equity
 
     # ── Close any still-open positions at last bar ────────────────────────────
@@ -378,19 +368,15 @@ def run_backtest(period: str = "2y") -> BacktestResult:
             ))
 
     # ── Compute per-segment metrics ───────────────────────────────────────────
-    full_trades     = [t for t in all_trades if t.fidelity == "FULL"]
-    degraded_trades = [t for t in all_trades if t.fidelity == "DEGRADED"]
-
-    full_seg     = _compute_segment_metrics(full_trades,     "FULL",     full_daily_returns)
-    degraded_seg = _compute_segment_metrics(degraded_trades, "DEGRADED", degraded_daily_returns)
+    proxy_trades = [t for t in all_trades if t.fidelity == "DAILY_PROXY"]
+    proxy_seg = _compute_segment_metrics(proxy_trades, "DAILY_PROXY", proxy_daily_returns)
 
     result_obj = BacktestResult(
         period_start=sorted_dates[0].strftime("%Y-%m-%d"),
         period_end=sorted_dates[-1].strftime("%Y-%m-%d"),
         all_trades=all_trades,
         equity_curve=equity_curve,
-        full=full_seg,
-        degraded=degraded_seg,
+        proxy=proxy_seg,
     )
 
     # ── Print report ──────────────────────────────────────────────────────────
@@ -400,30 +386,22 @@ def run_backtest(period: str = "2y") -> BacktestResult:
     print(f"  Final equity: ₹{equity_curve[-1]:,.2f}")
     print(f"{'='*65}")
 
-    if full_seg.total_trades > 0:
-        _print_segment(full_seg)
+    if proxy_seg.total_trades > 0:
+        _print_segment(proxy_seg)
     else:
-        print("\n  FULL mode: no trades in the intraday-available window.")
-
-    if degraded_seg.total_trades > 0:
-        _print_segment(degraded_seg)
-    else:
-        print("\n  DEGRADED mode: no trades in the daily-only window.")
+        print("\n  DAILY_PROXY mode: no trades in this run.")
 
     print(f"\n{'='*65}")
     return result_obj
 
 
 def save_to_database(result: BacktestResult):
-    """Persist the FULL-fidelity segment to backtest_results table."""
+    """Persist the current DAILY_PROXY segment to backtest_results table."""
     import psycopg2
-    DATABASE_URL = os.environ.get(
-        "DATABASE_URL",
-        "postgresql://neondb_owner:npg_ie0GzmROxE9f@ep-proud-bird-an4ydv35-pooler.c-6.us-east-1.aws.neon.tech/neondb?sslmode=require"
-    )
-    seg = result.full
+    DATABASE_URL = os.environ["DATABASE_URL"]
+    seg = result.proxy
     if seg is None or seg.total_trades == 0:
-        print("  No FULL-fidelity trades to save.")
+        print("  No DAILY_PROXY trades to save.")
         return
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -435,20 +413,20 @@ def save_to_database(result: BacktestResult):
          expectancy, total_pnl)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
-        "V3_Unified_FULL", seg.period_start, seg.period_end,
+        "V3_DAILY_PROXY", seg.period_start, seg.period_end,
         seg.total_trades, seg.win_rate, seg.profit_factor,
         seg.sharpe_ratio, seg.sortino_ratio, seg.max_drawdown_pct,
         seg.expectancy, seg.net_pnl,
     ))
     conn.commit()
     cur.close(); conn.close()
-    print("  ✅ FULL-fidelity results saved to database.\n")
+    print("  DAILY_PROXY results saved to database.\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="QuantumTrader V3 Backtester")
     parser.add_argument("--period", default="2y", help="yfinance period string (1y, 2y …)")
-    parser.add_argument("--save",   action="store_true", help="Save FULL results to database")
+    parser.add_argument("--save",   action="store_true", help="Save DAILY_PROXY results to database")
     args = parser.parse_args()
 
     result = run_backtest(period=args.period)

@@ -42,14 +42,25 @@ type SystemStatus = {
 
 const fetcher = (url: string) => fetch(url).then(res => res.json())
 
-function Stat({ label, value, sub, color = 'cyan', up }: { label: string; value: string; sub?: string; color?: string; up?: boolean }) {
+const colorVariants = {
+  cyan: { bg: 'via-cyan-500/50', text: 'text-cyan-400' },
+  blue: { bg: 'via-blue-500/50', text: 'text-blue-400' },
+  purple: { bg: 'via-purple-500/50', text: 'text-purple-400' },
+  emerald: { bg: 'via-emerald-500/50', text: 'text-emerald-400' },
+  red: { bg: 'via-red-500/50', text: 'text-red-400' },
+}
+
+function Stat({ label, value, sub, color = 'cyan', up }: { label: string; value: string; sub?: string; color?: keyof typeof colorVariants; up?: boolean }) {
+  const variant = colorVariants[color] || colorVariants.cyan;
+  const textClass = up === true ? colorVariants.emerald.text : up === false ? colorVariants.red.text : variant.text;
+  
   return (
     <motion.div whileHover={{ scale: 1.02, y: -2 }} transition={{ type: 'spring', stiffness: 300 }}
       className="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-xl shadow-2xl relative overflow-hidden group">
       {/* Subtle top glow */}
-      <div className={`absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-${color}-500/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500`} />
+      <div className={`absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent ${variant.bg} to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500`} />
       <p className="text-xs text-slate-400 uppercase tracking-widest mb-1 font-medium">{label}</p>
-      <p className={`text-2xl font-bold font-[family-name:var(--font-space)] tabular-nums tracking-tight ${up === true ? 'text-emerald-400' : up === false ? 'text-red-400' : `text-${color}-400`}`}>{value}</p>
+      <p className={`text-2xl font-bold font-[family-name:var(--font-space)] tabular-nums tracking-tight ${textClass}`}>{value}</p>
       {sub && <p className="text-xs text-slate-500 mt-1">{sub}</p>}
     </motion.div>
   )

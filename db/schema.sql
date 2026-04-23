@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS trades (
     regime VARCHAR(20),
     atr_at_entry NUMERIC(12,4),
     trailing_sl NUMERIC(12,2),
-    sentiment_score NUMERIC(4,2)
+    sentiment_score NUMERIC(4,2),
+    charges NUMERIC(12,4) DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS open_positions (
@@ -51,18 +52,17 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     snapshot_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- V2: Signal log for analytics
+-- V2: Signal log for analytics (Schema strictly mirrors trader.py emissions)
 CREATE TABLE IF NOT EXISTS signal_log (
     id SERIAL PRIMARY KEY,
     stock VARCHAR(20),
-    regime VARCHAR(20),
-    adx NUMERIC(6,2),
-    atr NUMERIC(12,4),
-    confluence_score INTEGER,
     action VARCHAR(10),
-    rsi NUMERIC(6,2),
-    ema_trend VARCHAR(10),
-    news_sentiment NUMERIC(4,2),
+    price NUMERIC(12,2),
+    reason TEXT,
+    confluence_score INTEGER,
+    regime VARCHAR(20),
+    atr NUMERIC(12,4),
+    sentiment_score NUMERIC(4,2),
     logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

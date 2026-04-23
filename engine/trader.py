@@ -15,10 +15,10 @@ import sys
 import io
 import time
 import traceback
-import psycopg2
 from datetime import datetime, timezone, timedelta
-from regime import detect_regime
+from db import Database
 from tenacity import retry, wait_fixed, stop_after_attempt
+from regime import detect_regime
 from risk_manager import (
     calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS
 )
@@ -135,29 +135,32 @@ def run():
             log_conn.commit(); lc.close(); log_conn.close()
         except Exception: pass
 
-    conn = get_conn()
-    cur = conn.cursor()
     now = datetime.now(IST)
-    
-    print(f"\n{'='*60}")
-    print(f"  QuantumTrader V3.1 — scan @ {now.strftime('%Y-%m-%d %H:%M:%S')} IST")
-    print(f"{'='*60}\n")
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] QuantumTrader Engine V3")
+
+    try:
+        db = Database()
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
+        finish_log('ERROR', error_msg=f"Database connection failed: {e}")
+        return
 
     if not is_market_open():
         print(f"  Wait: Market closed.")
         finish_log('MARKET_CLOSED')
         return
 
-    cur.execute("SELECT capital, cash, invested FROM portfolio ORDER BY updated_at DESC LIMIT 1")
-    row = cur.fetchone()
-    capital = float(row[0]) if row else INITIAL_CAPITAL
-    cash = float(row[1]) if row else INITIAL_CAPITAL
-    invested = float(row[2]) if row else 0
+    try:
+        portfolio = db.get_portfolio()
+        capital, cash, invested = float(portfolio["capital"]), float(portfolio["cash"]), float(portfolio["invested"])
+        print(f"  Portfolio: Capital ₹{capital:,.2f} | Cash ₹{cash:,.2f} | Invested ₹{invested:,.2f}")
+    except Exception as e:
+        print(f"❌ Failed to load portfolio: {e}")
+        finish_log('ERROR', error_msg=f"Portfolio error: {e}")
+        return
 
-    cur.execute("SELECT COUNT(*) FROM open_positions")
-    open_count = cur.fetchone()[0]
-    cur.execute("SELECT stock FROM open_positions")
-    held_stocks = {row[0] for row in cur.fetchall()}
+    held_stocks = db.get_held_stocks()
+    open_count = len(held_stocks)
 
     signals_total = 0; trades_total = 0
     print(f"  Portfolio: ₹{capital:,.0f} | Cash: ₹{cash:,.0f} | Open: {open_count}/{MAX_POSITIONS}\n")
@@ -173,22 +176,23 @@ def run():
         try:
             frames = universe_data.get(symbol, {})
             df_15 = frames.get("15m")
-            if df_15 is None or len(df_15) < 30: continue
+            if df_15 is None or len(df_15) < 30:
+                continue
 
             sig = evaluate_signal(symbol=symbol, frames=frames, capital=capital, cash=cash,
                                   held_stocks=held_stocks, sentiment_fn=_default_sentiment,
                                   open_count=open_count, max_positions=MAX_POSITIONS)
-            if sig.skipped: continue
+            if sig.skipped:
+                continue
 
-            if sig.final_action == "HOLD": continue
+            if sig.final_action == "HOLD":
+                continue
             signals_total += 1
 
-            # High-fidelity signal logging (only for actionable BUY/SELL signals)
-            cur.execute("""
-                INSERT INTO signal_log (stock, action, price, reason, confluence_score, regime, atr, sentiment_score, logged_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            """, (symbol, sig.final_action, sig.price, sig.reason_str,
-                  sig.confluence_score, sig.regime, sig.atr, sig.sentiment_score))
+            try:
+                db.log_signal(symbol, sig.final_action, sig.price, sig.reason_str, sig.confluence_score, sig.regime, sig.atr, sig.sentiment_score)
+            except Exception as e:
+                print(f"  ⚠ Signal logging failed for {symbol}: {e}")
 
             # Execution
             if sig.final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS:
@@ -199,53 +203,52 @@ def run():
                         print(f"  🟢 BUY: {short_name} @ ₹{sig.price:.2f}")
                         send_telegram_alert(f"🟢 BUY: {short_name} @ ₹{sig.price:.2f}")
 
-                        cur.execute("""
-                            INSERT INTO open_positions (stock, quantity, entry_price, stop_loss, target, entry_time, reason)
-                            VALUES (%s, %s, %s, %s, %s, NOW(), %s)
-                        """, (symbol, plan.quantity, sig.price, plan.stop_loss, plan.target, sig.reason_str))
-
-                        cur.execute("""
-                            INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status,
-                                                confluence_score, regime, atr_at_entry, sentiment_score)
-                            VALUES (%s, 'BUY', %s, %s, %s, NOW(), 'OPEN', %s, %s, %s, %s)
-                        """, (symbol, sig.price, plan.quantity, sig.reason_str,
-                              sig.confluence_score, sig.regime, sig.atr, sig.sentiment_score))
-
-                        cur.execute("UPDATE portfolio SET cash = cash - %s, invested = invested + %s, updated_at = NOW()", (cost, cost))
-                        open_count += 1; cash -= cost; held_stocks.add(symbol)
+                        try:
+                            db.execute_buy(symbol, plan.quantity, sig.price, plan.stop_loss, plan.target, sig.reason_str, sig.confluence_score, sig.regime, sig.atr, sig.sentiment_score)
+                            open_count += 1
+                            cash -= cost
+                            held_stocks.add(symbol)
+                            trades_total += 1
+                        except Exception as e:
+                            print(f"  ❌ BUY execution failed for {symbol}: {e}")
 
             elif sig.final_action == "SELL":
-                cur.execute("SELECT quantity, entry_price FROM open_positions WHERE stock = %s", (symbol,))
-                pos = cur.fetchone()
+                open_pos = db.get_open_positions()
+                pos = next((p for p in open_pos if p["stock"] == symbol), None)
                 if pos:
-                    qty, ent = int(pos[0]), float(pos[1])
+                    qty, ent = int(pos["quantity"]), float(pos["entry_price"])
                     c = calculate_realistic_charges(ent, sig.price, qty, False)
                     print(f"  🔴 SELL: {short_name} @ ₹{sig.price:.2f} | PnL: ₹{c.net_pnl:+.2f}")
                     send_telegram_alert(f"🔴 SELL: {short_name} @ ₹{sig.price:.2f} | PnL: ₹{c.net_pnl:+.2f}")
 
-                    cur.execute("""
-                        UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s
-                        WHERE stock=%s AND status='OPEN'
-                    """, (sig.price, c.net_pnl, c.total, symbol))
-                    cur.execute("DELETE FROM open_positions WHERE stock = %s", (symbol,))
-                    proceeds = sig.price * qty - c.total
-                    cur.execute("UPDATE portfolio SET cash = cash + %s, invested = invested - %s, capital = capital + %s, pnl = pnl + %s, updated_at = NOW()",
-                                (proceeds, ent * qty, c.net_pnl, c.net_pnl))
-                    open_count -= 1; cash += proceeds; held_stocks.discard(symbol); trades_total += 1
+                    try:
+                        db.execute_sell(symbol, qty, ent, sig.price, c.net_pnl, c.total)
+                        proceeds = sig.price * qty - c.total
+                        open_count -= 1
+                        cash += proceeds
+                        held_stocks.discard(symbol)
+                        trades_total += 1
+                    except Exception as e:
+                        print(f"  ❌ SELL execution failed for {symbol}: {e}")
+
         except Exception as e:
-            conn.rollback()
             print(f"  ❌ Error {short_name}: {e}")
 
     # ─── 2. Manage Open Positions (Intrabar + Trailing) ──────────
     print(f"  Checking open positions...")
-    cur.execute("SELECT stock, quantity, entry_price, stop_loss, target FROM open_positions")
-    open_pos_snapshot = cur.fetchall()  # snapshot to avoid mutating cursor mid-iteration
+    open_pos_snapshot = db.get_open_positions()
     for pos in open_pos_snapshot:
-        stock, qty, entry, sl, target = pos[0], int(pos[1]), float(pos[2]), float(pos[3]), float(pos[4])
+        stock = pos["stock"]
+        qty = int(pos["quantity"])
+        entry = float(pos["entry_price"])
+        sl = float(pos["stop_loss"])
+        target = float(pos["target"])
+
         try:
             frames = universe_data.get(stock, {})
-            df=frames.get("15m")
-            if df is None or len(df) < 2: continue
+            df = frames.get("15m")
+            if df is None or df.empty or len(df) < 2:
+                continue
             curr = df.iloc[-1]
             price = float(curr["close"])
             
@@ -257,29 +260,29 @@ def run():
                 print(f"  🛑 {etype} hit for {stock} at ₹{fp:.2f}")
                 send_telegram_alert(f"🛑 {etype} hit for {stock} at ₹{fp:.2f}")
 
-                cur.execute("UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s WHERE stock=%s AND status='OPEN'",
-                            (fp, c.net_pnl, c.total, stock))
-                cur.execute("DELETE FROM open_positions WHERE stock = %s", (stock,))
+                db.execute_sell(stock, qty, entry, fp, c.net_pnl, c.total)
                 proceeds = fp * qty - c.total
-                cur.execute("UPDATE portfolio SET cash = cash + %s, invested = invested - %s, capital = capital + %s, pnl = pnl + %s, updated_at = NOW()",
-                            (proceeds, entry * qty, c.net_pnl, c.net_pnl))
-                open_count -= 1; cash += proceeds; held_stocks.discard(stock); trades_total += 1
+                open_count -= 1
+                cash += proceeds
+                held_stocks.discard(stock)
+                trades_total += 1
                 continue
 
             # Trailing
             atr = calculate_atr(df) or (price * 0.01)
-            adx = detect_regime(frames.get("1d") or df).adx
+            regime_src = frames.get("1d")
+            if regime_src is None or regime_src.empty:
+                regime_src = df
+            adx = detect_regime(regime_src).adx
             upd = check_trailing_stop(stock, entry, price, sl, atr, adx)
             if upd.should_update:
-                cur.execute("UPDATE open_positions SET stop_loss = %s WHERE stock = %s", (upd.new_stop, stock))
-                cur.execute("UPDATE trades SET trailing_sl = %s WHERE stock = %s AND status = 'OPEN'", (upd.new_stop, stock))
+                db.update_trailing_stop(stock, upd.new_stop)
+
         except Exception as e:
-            conn.rollback()
             print(f"  ❌ Exit err {stock}: {e}")
 
     # ─── 3. Finalize ──────────────────────────
-    cur.execute("INSERT INTO equity_snapshots (capital, cash, invested) SELECT capital, cash, invested FROM portfolio ORDER BY updated_at DESC LIMIT 1")
-    conn.commit(); cur.close(); conn.close()
+    db.snapshot_equity()
     finish_log('SUCCESS', stocks_scanned=len(STOCKS), signals_fired=signals_total, trades_executed=trades_total)
 
 
@@ -291,7 +294,10 @@ def _safe_run():
         print(f"FATAL: {e}\n{err}")
         send_telegram_alert(f"FATAL ERROR: {e}")
         try:
-            conn = get_conn(); cur = conn.cursor()
+            import psycopg2
+            import os
+            conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
+            cur = conn.cursor()
             cur.execute("UPDATE run_logs SET status='ERROR', finished_at=NOW(), error_message=%s, log_lines=%s WHERE id = (SELECT id FROM run_logs ORDER BY started_at DESC LIMIT 1)", (str(e)[:500], err[:10000]))
             conn.commit(); cur.close(); conn.close()
         except Exception: pass

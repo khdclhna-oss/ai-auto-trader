@@ -1,11 +1,8 @@
-"""Run V2 database migration against Neon PostgreSQL."""
+"""Run the checked-in database migration against PostgreSQL."""
 import os
 import psycopg2
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://neondb_owner:npg_ie0GzmROxE9f@ep-proud-bird-an4ydv35-pooler.c-6.us-east-1.aws.neon.tech/neondb?sslmode=require"
-)
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 MIGRATION = """
 -- Add new columns to trades
@@ -28,18 +25,18 @@ ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS pnl_pct NUMERIC(8,4) NOT NULL DEF
 UPDATE portfolio SET pnl = capital - 100000.00, pnl_pct = ((capital - 100000.00) / 100000.00) * 100
 WHERE id = (SELECT id FROM portfolio ORDER BY updated_at DESC LIMIT 1);
 
--- Signal log
+-- Signal log (DROP and RECREATE to enforce new schema)
+DROP TABLE IF EXISTS signal_log;
 CREATE TABLE IF NOT EXISTS signal_log (
     id SERIAL PRIMARY KEY,
     stock VARCHAR(20),
-    regime VARCHAR(20),
-    adx NUMERIC(6,2),
-    atr NUMERIC(12,4),
-    confluence_score INTEGER,
     action VARCHAR(10),
-    rsi NUMERIC(6,2),
-    ema_trend VARCHAR(10),
-    news_sentiment NUMERIC(4,2),
+    price NUMERIC(12,2),
+    reason TEXT,
+    confluence_score INTEGER,
+    regime VARCHAR(20),
+    atr NUMERIC(12,4),
+    sentiment_score NUMERIC(4,2),
     logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

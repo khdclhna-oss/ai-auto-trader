@@ -44,25 +44,29 @@ const fetcher = (url: string) => fetch(url).then(res => res.json())
 
 function Stat({ label, value, sub, color = 'cyan', up }: { label: string; value: string; sub?: string; color?: string; up?: boolean }) {
   return (
-    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-sm">
-      <p className="text-xs text-slate-400 uppercase tracking-widest mb-1">{label}</p>
-      <p className={`text-2xl font-bold ${up === true ? 'text-emerald-400' : up === false ? 'text-red-400' : `text-${color}-400`}`}>{value}</p>
+    <motion.div whileHover={{ scale: 1.02, y: -2 }} transition={{ type: 'spring', stiffness: 300 }}
+      className="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-xl shadow-2xl relative overflow-hidden group">
+      {/* Subtle top glow */}
+      <div className={`absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-${color}-500/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500`} />
+      <p className="text-xs text-slate-400 uppercase tracking-widest mb-1 font-medium">{label}</p>
+      <p className={`text-2xl font-bold font-[family-name:var(--font-space)] tabular-nums tracking-tight ${up === true ? 'text-emerald-400' : up === false ? 'text-red-400' : `text-${color}-400`}`}>{value}</p>
       {sub && <p className="text-xs text-slate-500 mt-1">{sub}</p>}
-    </div>
+    </motion.div>
   )
 }
 
 function MetricCard({ label, value, icon: Icon, good, bad }: { label: string; value: string | number; icon: any; good?: boolean; bad?: boolean }) {
   return (
-    <div className={`rounded-xl p-4 border backdrop-blur-sm flex items-center gap-4 ${good ? 'bg-emerald-500/10 border-emerald-500/20' : bad ? 'bg-red-500/10 border-red-500/20' : 'bg-white/5 border-white/10'}`}>
-      <div className={`p-2 rounded-lg ${good ? 'bg-emerald-500/20' : bad ? 'bg-red-500/20' : 'bg-white/10'}`}>
+    <motion.div whileHover={{ scale: 1.02, y: -2 }} transition={{ type: 'spring', stiffness: 300 }}
+      className={`rounded-2xl p-4 border backdrop-blur-xl flex items-center gap-4 relative overflow-hidden group ${good ? 'bg-emerald-500/5 border-emerald-500/20' : bad ? 'bg-red-500/5 border-red-500/20' : 'bg-white/5 border-white/10'}`}>
+      <div className={`p-2 rounded-xl transition-colors duration-300 ${good ? 'bg-emerald-500/10 group-hover:bg-emerald-500/20' : bad ? 'bg-red-500/10 group-hover:bg-red-500/20' : 'bg-white/5 group-hover:bg-white/10'}`}>
         <Icon className={`w-5 h-5 ${good ? 'text-emerald-400' : bad ? 'text-red-400' : 'text-slate-300'}`} />
       </div>
       <div>
-        <p className="text-xs text-slate-400 uppercase tracking-wider">{label}</p>
-        <p className={`text-xl font-bold ${good ? 'text-emerald-400' : bad ? 'text-red-400' : 'text-white'}`}>{value}</p>
+        <p className="text-xs text-slate-400 uppercase tracking-wider font-medium">{label}</p>
+        <p className={`text-xl font-bold font-[family-name:var(--font-space)] tabular-nums ${good ? 'text-emerald-400' : bad ? 'text-red-400' : 'text-white'}`}>{value}</p>
       </div>
-    </div>
+    </motion.div>
   )
 }
 
@@ -135,7 +139,7 @@ export default function Dashboard() {
   ]
 
   return (
-    <div className="min-h-screen bg-[#070d1a] text-white p-6" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+    <div className="min-h-screen bg-mesh text-slate-200 p-6 selection:bg-cyan-500/30 selection:text-cyan-100 font-sans">
       <div className="max-w-6xl mx-auto space-y-6">
 
         {/* Header */}
@@ -153,9 +157,9 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="text-right">
-            <p className="text-xs text-slate-500">Portfolio Value</p>
-            <p className="text-2xl font-bold text-white">₹{n(portfolio?.capital).toLocaleString()}</p>
-            <p className={`text-sm font-medium ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            <p className="text-xs text-slate-400 uppercase tracking-widest font-medium">Portfolio Value</p>
+            <p className="text-3xl font-bold text-white font-[family-name:var(--font-space)] tabular-nums tracking-tight">₹{n(portfolio?.capital).toLocaleString()}</p>
+            <p className={`text-sm font-medium tabular-nums ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
               {pnl >= 0 ? '+' : ''}₹{pnl.toFixed(2)} ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
             </p>
           </div>
@@ -212,12 +216,12 @@ export default function Dashboard() {
                   <Stat label="Total P&L" value={`${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}`} up={pnl >= 0} />
                 </div>
 
-                <div className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-sm">
+                <div className="bg-white/5 border border-white/10 rounded-3xl p-6 backdrop-blur-xl shadow-2xl">
                   <div className="flex items-center justify-between mb-4">
-                    <h2 className="font-semibold text-slate-200">Equity Curve</h2>
-                    <span className="text-xs text-slate-500">Live · refreshes every 15s</span>
+                    <h2 className="font-semibold text-white flex items-center gap-2"><LineChart className="w-5 h-5 text-cyan-400" /> Equity Curve</h2>
+                    <span className="text-xs text-slate-400 bg-white/5 px-2 py-1 rounded-md border border-white/5">Live · refreshes every 15s</span>
                   </div>
-                  <div className="h-64">
+                  <div className="h-72">
                     {equity && equity.length > 1
                       ? <Line data={chartData} options={chartOptions} />
                       : <div className="h-full flex items-center justify-center text-slate-500 text-sm">Accumulating data…</div>
@@ -245,12 +249,13 @@ export default function Dashboard() {
                   const tgtDist = tgt - entry
                   const rr = slDist > 0 ? tgtDist / slDist : 0
                   return (
-                    <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.05 }}
-                      className="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-sm">
-                      <div className="flex items-center justify-between mb-3">
+                    <motion.div key={i} initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.05, type: 'spring' }}
+                      whileHover={{ scale: 1.01, backgroundColor: 'rgba(255,255,255,0.08)' }}
+                      className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-xl shadow-lg group transition-colors">
+                      <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-3">
-                          <span className="text-lg font-bold">{pos.stock.replace('.NS', '')}</span>
-                          <span className="text-xs bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full">LONG</span>
+                          <span className="text-xl font-bold text-white tracking-tight">{pos.stock.replace('.NS', '')}</span>
+                          <span className="text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest shadow-[0_0_10px_rgba(16,185,129,0.2)]">LONG</span>
                         </div>
                         <span className="text-xs text-slate-400">RR: {rr.toFixed(1)}x</span>
                       </div>
@@ -281,8 +286,9 @@ export default function Dashboard() {
                 <h2 className="font-semibold text-slate-200">Recent Execution History</h2>
                 <div className="space-y-3">
                   {(log || []).map((t, i) => (
-                    <motion.div key={t.id} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.03 }}
-                      className="bg-white/5 border border-white/10 rounded-xl p-4 backdrop-blur-sm">
+                    <motion.div key={t.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.03 }}
+                      whileHover={{ scale: 1.01, backgroundColor: 'rgba(255,255,255,0.08)' }}
+                      className="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-xl shadow-lg transition-colors">
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-semibold">{t.stock.replace('.NS','')}</span>
@@ -318,8 +324,8 @@ export default function Dashboard() {
                             </>
                           )}
 
-                          {t.pnl && Number(t.pnl) !== 0 && (
-                            <span className={`text-sm font-bold ${Number(t.pnl) > 0 ? 'text-emerald-400' : 'text-red-400'} ml-auto`}>
+                           {t.pnl && Number(t.pnl) !== 0 && (
+                            <span className={`text-base font-bold tabular-nums font-[family-name:var(--font-space)] ${Number(t.pnl) > 0 ? 'text-emerald-400' : 'text-red-400'} ml-auto drop-shadow-md`}>
                               {Number(t.pnl) > 0 ? 'Net +' : 'Net '}₹{Number(t.pnl).toFixed(2)}
                             </span>
                           )}

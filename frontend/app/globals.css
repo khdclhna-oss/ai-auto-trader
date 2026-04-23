@@ -1,3 +1,14 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer utilities {
+  .bg-mesh {
+    background-color: #050b14;
+    background-image: 
+      radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+      radial-gradient(at 50% 0%, hsla(225,39%,30%,0.15) 0, transparent 50%), 
+      radial-gradient(at 100% 0%, hsla(188,71%,38%,0.1) 0, transparent 50%);
+    background-attachment: fixed;
+  }
+}

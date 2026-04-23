@@ -76,6 +76,8 @@ class BacktestTrade:
     note: str
     hold_bars: int = 0
     fidelity: str = "FULL"   # FULL or DEGRADED
+    confluence: float = 0.0
+    sentiment: float = 0.0
 
 
 @dataclass
@@ -283,13 +285,10 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                     del held_positions[symbol]
                     continue
 
-                # Breakeven trigger
-                price_now = float(row["close"])
-                unr_pct = ((price_now - pos["entry"]) / pos["entry"]) * 100
-                if unr_pct >= 1.5 and pos["sl"] < pos["entry"]:
-                    pos["sl"] = pos["entry"]
-
                 # Trailing stop using synced risk_manager constants
+                # (V3.2: removed hardcoded 1.5% breakeven trigger — live engine uses
+                #  check_trailing_stop which handles breakeven via TRAIL_ACTIVATION)
+                price_now = float(row["close"])
                 unrealized = price_now - pos["entry"]
                 if unrealized > TRAIL_ACTIVATION * atr_val:
                     new_sl = max(pos["sl"], price_now - TRAIL_DISTANCE * atr_val)
@@ -324,6 +323,8 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                         "qty": plan.quantity, "entry": result.price,
                         "sl": plan.stop_loss, "target": plan.target,
                         "entry_time": date, "entry_idx": i, "fidelity": fidelity,
+                        "confluence": result.confluence_score,
+                        "sentiment": result.sentiment_score,
                     }
                     cash -= result.price * plan.quantity
 
@@ -365,7 +366,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
     for symbol, pos in list(held_positions.items()):
         if last_date in daily_data[symbol].index:
             fp = float(daily_data[symbol].loc[last_date]["close"])
-            c  = calculate_realistic_charges(pos["entry"], fp, pos["qty"], is_intraday=True)
+            c  = calculate_realistic_charges(pos["entry"], fp, pos["qty"], is_intraday=False)
             pnl = c.net_pnl
             all_trades.append(BacktestTrade(
                 stock=symbol, action="SELL",

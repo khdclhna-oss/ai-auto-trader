@@ -104,7 +104,15 @@ def evaluate_signal(
     confluence = get_confluence(symbol, frames, regime_result.regime)
 
     # ── Step 3: Sentiment-adjusted score ─────────────────────────────────────
-    sentiment_score = sentiment_fn(symbol)
+    # [P0 FIX] Lazy LLM Evaluation: Only query the LLM if the technical confluence
+    # is close enough to a threshold that a +1/-1 from sentiment could trigger a trade.
+    # BUY needs score >= 4, so query if confluence >= 3.  SELL needs <= -2, so query if <= -1.
+    score = confluence.confluence_score
+    if score >= (BUY_THRESHOLD - 1) or score <= (SELL_THRESHOLD + 1):
+        sentiment_score = sentiment_fn(symbol)
+    else:
+        sentiment_score = 0.0
+
     sentiment = 0
     if sentiment_score > 0.3:  sentiment = 1
     if sentiment_score < -0.3: sentiment = -1
@@ -129,9 +137,11 @@ def evaluate_signal(
         atr = price * 0.01
 
     # ── Step 6: Sentiment-gated final action ──────────────────────────────────
-    # [P0 FIX] final_action is derived from effective_score, NOT from confluence.action.
-    # Negative news can veto a BUY signal.
-    if effective_score >= BUY_THRESHOLD:
+    # [P0 FIX] final_action is derived from effective_score, but MUST respect hard HOLD constraints 
+    # (like the RANGING regime filter) from the confluence engine.
+    if confluence.action == "HOLD":
+        final_action = "HOLD"
+    elif effective_score >= BUY_THRESHOLD:
         final_action = "BUY"
     elif effective_score <= SELL_THRESHOLD:
         final_action = "SELL"

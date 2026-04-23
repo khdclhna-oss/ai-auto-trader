@@ -10,7 +10,7 @@ export async function GET() {
   try {
     const { rows } = await client.query(`
       SELECT id, stock, action, entry_price, exit_price, quantity, pnl, reason, 
-             entry_time, exit_time, status, confluence_score, regime, atr_at_entry, sentiment_score
+             entry_time, exit_time, status, confluence_score, regime, atr_at_entry, sentiment_score, charges
       FROM trades 
       WHERE status IN ('OPEN', 'CLOSED', 'SIGNAL')
       ORDER BY entry_time DESC LIMIT 50

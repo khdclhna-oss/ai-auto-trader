@@ -19,12 +19,12 @@ from typing import Optional
 
 
 # Configuration  (V2.1)
-# Configuration  (V2.1)
+# Configuration  (V3.2)
 RISK_PER_TRADE = 0.03    # 3% of capital per trade (Increased conviction)
-ATR_SL_MULTIPLIER = 2.0  # stop = entry - 2*ATR
-ATR_TP_MULTIPLIER = 4.0  # target = entry + 4*ATR  (↑ from 3x → better RR)
-TRAIL_ACTIVATION = 2.0   # activate trailing after 2*ATR profit (gives trade room)
-TRAIL_DISTANCE = 2.0     # trail stop by 2*ATR once activated (widened to let winners run)
+ATR_SL_MULTIPLIER = 2.5  # stop = entry - 2.5*ATR (Widened to survive noise)
+ATR_TP_MULTIPLIER = 5.0  # target = entry + 5*ATR (Aiming for 1:2 RRR minimum)
+TRAIL_ACTIVATION = 3.0   # activate trailing after 3*ATR profit (gives trade room)
+TRAIL_DISTANCE = 2.5     # trail stop by 2.5*ATR once activated (widened to let winners run)
 MAX_POSITIONS = 5        # max simultaneous positions (synced with live engine to save transaction costs)
 
 
@@ -168,7 +168,7 @@ def check_trailing_stop(
         
         # ADX Decay Check
         if adx is not None and adx < 25:
-            trail_dist = 0.5  # tighten aggressively
+            trail_dist = 1.5  # tighten, but not so much that a single wick stops it out
         
         # Trail stop = price - dist*ATR, but never move it DOWN
         candidate_stop = round(current_price - (trail_dist * atr), 2)

@@ -42,7 +42,7 @@ STOCKS = [
     "VBL.NS", "VEDL.NS", "WIPRO.NS", "ZOMATO.NS", "ZYDUSLIFE.NS", "BHEL.NS", "IDFCFIRSTB.NS", "IRFC.NS", "JIOFIN.NS", 
     "LODHA.NS", "OFSS.NS", "PAGEIND.NS", "TATACOMM.NS", "ADANIENSOL.NS", "ADANIGREEN.NS", "ATGL.NS", "BAJAJHLDNG.NS"
 ]
-DATABASE_URL = os.environ["DATABASE_URL"]
+# DATABASE_URL is read lazily inside db.py to avoid crashing at import time.
 INITIAL_CAPITAL = 100000
 
 
@@ -107,14 +107,27 @@ def run():
     sys.stdout = tee
     start_ts = time.time()
     run_id = None
-    log_conn = psycopg2.connect(DATABASE_URL)
+
+    # Separate connection just for run_logs (kept alive across the whole run)
+    try:
+        import psycopg2
+        _db_url = os.environ.get("DATABASE_URL")
+        if not _db_url:
+            raise ValueError("DATABASE_URL not set")
+        log_conn = psycopg2.connect(_db_url)
+    except Exception as e:
+        sys.stdout = tee._stdout
+        print(f"[run_logs] DB connection failed: {e}")
+        sys.stdout = tee
+        log_conn = None
 
     try:
-        log_cur = log_conn.cursor()
-        log_cur.execute("INSERT INTO run_logs (started_at, status) VALUES (NOW(), 'RUNNING') RETURNING id")
-        run_id = log_cur.fetchone()[0]
-        log_conn.commit()
-        log_cur.close()
+        if log_conn:
+            log_cur = log_conn.cursor()
+            log_cur.execute("INSERT INTO run_logs (started_at, status) VALUES (NOW(), 'RUNNING') RETURNING id")
+            run_id = log_cur.fetchone()[0]
+            log_conn.commit()
+            log_cur.close()
     except Exception as e:
         sys.stdout = tee._stdout
         print(f"[run_logs] Could not create run record: {e}")
@@ -122,7 +135,7 @@ def run():
 
     def finish_log(status, stocks_scanned=0, signals_fired=0, trades_executed=0, error_msg=None):
         sys.stdout = tee._stdout
-        if run_id is None: return
+        if run_id is None or log_conn is None: return
         try:
             duration_ms = int((time.time() - start_ts) * 1000)
             lc = log_conn.cursor()

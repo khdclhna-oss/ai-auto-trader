@@ -1,13 +1,20 @@
 """
-QuantumTrader V3.1 — Institutional Hardened Orchestrator
-=====================================================
-The main trading engine. Coordinates:
-  1. Multi-timeframe analysis (daily + hourly + 15m)
-  2. Market regime detection (trending / ranging / volatile)
-  3. Confluence-based signal generation (unified signals.py)
-  4. ATR-based risk management & position sizing (risk_manager.py)
-  5. Intrabar SL/TP execution (Stop-First, Gap-Slippage parity)
-  6. High-fidelity signal logging
+QuantumTrader V4.0 — Institutional-Grade Swing Trading Engine
+=============================================================
+5-Layer Architecture:
+  Layer 1 | Macro Filter      — Nifty 50 EMA structure + VIX + breadth gate
+  Layer 2 | Sector Rotation   — Top-5 NSE sectors by 20d/60d momentum
+  Layer 3 | Opportunity Rank  — Composite score (RS, volume, breakout, trend, RRR)
+                                 Only the TOP 5 ranked stocks get full evaluation
+  Layer 4 | Signal Evaluation — Multi-TF confluence (signals.py + multi_timeframe.py)
+  Layer 5 | Trade Management  — ATR-based trailing stops + position management
+
+Key V4 principles vs V3:
+  - SELECT the best, don't FILTER the worst
+  - Macro regime blocks all new longs (index alignment is free tailwind)
+  - Sector rotation adds another free tailwind
+  - Kelly criterion tracks live edge — alerts when system is unprofitable
+  - 24h cooldown + daily -2R guard + max-1-entry/symbol/day guard all active
 """
 
 import os
@@ -25,6 +32,11 @@ from risk_manager import (
 from calculator import calculate_realistic_charges
 from alerts import send_telegram_alert
 from signals import evaluate_signal, _default_sentiment, apply_intrabar_exit
+# V4 Architecture Layers
+from macro_filter import get_macro_state
+from sector_rotation import get_allowed_sectors, get_sector_for_stock
+from ranker import rank_universe
+from kelly import get_kelly_from_db
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -163,6 +175,22 @@ def run():
         finish_log('MARKET_CLOSED')
         return
 
+    # ─── V4 Layer 1: Macro Filter ─────────────────────────────────────────────
+    # Don't trade individual stocks when the index is broken.
+    # 70-80% of NSE large-cap moves are explained by index direction.
+    try:
+        macro = get_macro_state(use_cache=True)
+        if not macro.tradeable:
+            print(f"  🚫 MACRO FILTER BLOCKED: {macro.reason}")
+            send_telegram_alert(f"🚫 Macro blocked: {macro.reason}")
+            finish_log('MARKET_CLOSED', error_msg=f"Macro filter: {macro.reason}")
+            return
+        print(f"  ✅ Macro clear | Nifty200EMA={'✅' if macro.nifty_above_200ema else '❌'} "
+              f"| 50EMA slope={'✅' if macro.nifty_50ema_slope_up else '❌'} "
+              f"| VIX={macro.vix:.1f} | Breadth={macro.breadth_pct:.0f}%")
+    except Exception as e:
+        print(f"  ⚠ Macro filter failed (fail-open): {e}")
+
     try:
         portfolio = db.get_portfolio()
         capital, cash, invested = float(portfolio["capital"]), float(portfolio["cash"]), float(portfolio["invested"])
@@ -174,6 +202,24 @@ def run():
 
     held_stocks = db.get_held_stocks()
     open_count = len(held_stocks)
+
+    # ─── V4 Layer 2: Sector Rotation ─────────────────────────────────────────
+    # Only trade stocks in sectors showing positive momentum.
+    allowed_sectors = None
+    try:
+        allowed_sectors = get_allowed_sectors(top_n_fraction=0.5, use_cache=True)
+    except Exception as e:
+        print(f"  ⚠ Sector rotation failed (fail-open, all sectors allowed): {e}")
+
+    # ─── V4 Kelly Monitor ────────────────────────────────────────────────────
+    # Always show the live Kelly state — informs whether to size up or halt.
+    try:
+        kelly = get_kelly_from_db(db)
+        if not kelly.has_edge:
+            print(f"  ⚠ [kelly] System has NO positive edge yet ({kelly.sample_size} trades). "
+                  f"WR={kelly.win_rate:.0%}, Payoff={kelly.payoff_ratio:.2f}x — TUNING MODE")
+    except Exception as e:
+        print(f"  ⚠ Kelly computation failed: {e}")
 
     # V3.6: Daily Loss Circuit Breaker (-2R guard)
     # If today's realized losses exceed 2x avg risk per trade, stop new BUYs.
@@ -198,8 +244,26 @@ def run():
         finish_log('ERROR', error_msg="Batch fetch failed")
         return
 
+    # ─── V4 Layer 3: Opportunity Ranking ─────────────────────────────────────
+    # Rank the full universe. Only evaluate the top-5 candidates in detail.
+    # This replaces the flat 100-stock scan with a selection-first approach.
+    try:
+        ranked_candidates = rank_universe(
+            universe_data=universe_data,
+            top_n=5,
+            allowed_sectors=allowed_sectors,
+        )
+        # For open positions, always check their management regardless of rank
+        ranked_symbols = {r.symbol for r in ranked_candidates}
+        held_symbols_to_check = held_stocks  # always manage exits
+        symbols_to_evaluate = list(ranked_symbols | held_symbols_to_check)
+        print(f"  🎯 V4: Evaluating {len(ranked_candidates)} ranked candidates + {len(held_stocks)} open positions")
+    except Exception as e:
+        print(f"  ⚠ Ranker failed (fail-open, using full universe): {e}")
+        symbols_to_evaluate = STOCKS
+
     # ─── 1. Analyze Universe ──────────────────────────
-    for symbol in STOCKS:
+    for symbol in symbols_to_evaluate:
         short_name = symbol.replace(".NS", "")
         try:
             frames = universe_data.get(symbol, {})

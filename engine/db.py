@@ -129,3 +129,33 @@ class Database:
         with self.conn.cursor() as cur:
             cur.execute("SELECT stock FROM open_positions")
             return {r[0] for r in cur.fetchall()}
+
+    def get_today_realized_pnl(self) -> float:
+        """
+        Returns the sum of PnL for all trades closed today (IST).
+        Used by the -2R daily loss circuit breaker in trader.py.
+        Negative value = net loss today.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(pnl), 0) FROM trades
+                WHERE status = 'CLOSED'
+                  AND exit_time >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            """)
+            row = cur.fetchone()
+            return float(row[0]) if row else 0.0
+
+    def had_entry_today(self, stock: str) -> bool:
+        """
+        Returns True if there was any entry (OPEN or CLOSED) for this stock today (IST).
+        Used to enforce max-1-new-entry-per-symbol-per-day rule.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1 FROM trades
+                WHERE stock = %s
+                  AND entry_time >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+                LIMIT 1
+            """, (stock,))
+            return cur.fetchone() is not None
+

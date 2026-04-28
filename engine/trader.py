@@ -175,6 +175,21 @@ def run():
     held_stocks = db.get_held_stocks()
     open_count = len(held_stocks)
 
+    # V3.6: Daily Loss Circuit Breaker (-2R guard)
+    # If today's realized losses exceed 2x avg risk per trade, stop new BUYs.
+    # Avg risk per trade @ 1% of ₹1,00,000 = ₹1,000 → -2R threshold = -₹2,000
+    DAILY_LOSS_LIMIT = -(capital * 0.01 * 2)  # -2R in rupees
+    daily_pnl = 0.0
+    daily_loss_limit_hit = False
+    try:
+        daily_pnl = db.get_today_realized_pnl()
+        if daily_pnl <= DAILY_LOSS_LIMIT:
+            daily_loss_limit_hit = True
+            print(f"  ⛔ DAILY LOSS GUARD: Today P&L ₹{daily_pnl:+.2f} ≤ -2R limit ₹{DAILY_LOSS_LIMIT:.2f}. No new BUYs today.")
+            send_telegram_alert(f"⛔ Daily loss guard hit: ₹{daily_pnl:+.2f}. Halting new entries.")
+    except Exception as e:
+        print(f"  ⚠ Could not check daily P&L: {e}")
+
     signals_total = 0; trades_total = 0
     print(f"  Portfolio: ₹{capital:,.0f} | Cash: ₹{cash:,.0f} | Open: {open_count}/{MAX_POSITIONS}\n")
     
@@ -209,11 +224,25 @@ def run():
 
             # Execution
             if sig.final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS:
+                # V3.6: Daily loss guard — halt all new BUYs if -2R hit today
+                if daily_loss_limit_hit:
+                    print(f"  ⛔ {short_name}: Daily loss guard active — BUY skipped")
+                    continue
+
                 # V3.5 Guard 1: RANGING regime double-check at execution time
                 # Data: 13 RANGING trades, 23.1% WR, -₹2,271 total
                 if sig.regime == "RANGING":
                     print(f"  ⛔ {short_name}: RANGING regime — BUY blocked")
                     continue
+
+                # V3.6: Max 1 new entry per symbol per day
+                # Separate from cooldown (cooldown = post-loss; this = any repeat same day)
+                try:
+                    if db.had_entry_today(symbol):
+                        print(f"  ⏸ {short_name}: Already entered today — max 1 entry/symbol/day")
+                        continue
+                except Exception:
+                    pass  # fail-open: allow trade if DB check fails
 
                 # V3.5 Guard 2: 24h cooldown after losing exit on same symbol
                 # Data: AXISBANK re-entered 1.5h after loss, lost ₹651 more

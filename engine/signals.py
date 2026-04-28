@@ -30,9 +30,16 @@ PRICE_SANITY_PCT = 20  # reject bars with >20% change (split/stale data guard)
 GAP_SLIPPAGE   = 0.001  # 0.1% extra fill haircut for gap-through exits
 MIN_TARGET_PCT = 2.0   # V3.5: minimum target move % to justify charges (~0.40% breakeven)
 
+# V3.6: Sentiment disabled until live LLM produces non-zero scores.
+# All 31 closed trades had sentiment_score = 0. Re-enable once you have
+# verified that get_llm_sentiment() returns non-zero values in production.
+SENTIMENT_ACTIVE = False
+
 
 def _default_sentiment(symbol: str) -> float:
-    """Real-time Gemini LLM sentiment. Used in live trading only."""
+    """Real-time Gemini LLM sentiment. Disabled until non-zero live coverage confirmed."""
+    if not SENTIMENT_ACTIVE:
+        return 0.0  # V3.6: All 31 trades had score=0 — LLM is inactive in production
     try:
         from sentiment_llm import get_llm_sentiment
         return get_llm_sentiment(symbol)
@@ -109,7 +116,9 @@ def evaluate_signal(
     # is close enough to a threshold that a +1/-1 from sentiment could trigger a trade.
     # BUY needs score >= 4, so query if confluence >= 3.  SELL needs <= -2, so query if <= -1.
     score = confluence.confluence_score
-    if score >= (BUY_THRESHOLD - 1) or score <= (SELL_THRESHOLD + 1):
+    # V3.6: Only call LLM if sentiment is actually active (currently disabled).
+    # When SENTIMENT_ACTIVE=False, sentiment_score is always 0.0 — skip the call entirely.
+    if SENTIMENT_ACTIVE and (score >= (BUY_THRESHOLD - 1) or score <= (SELL_THRESHOLD + 1)):
         sentiment_score = sentiment_fn(symbol)
     else:
         sentiment_score = 0.0

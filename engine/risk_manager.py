@@ -18,14 +18,16 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# Configuration  (V2.1)
-# Configuration  (V3.2)
-RISK_PER_TRADE = 0.03    # 3% of capital per trade (Increased conviction)
-ATR_SL_MULTIPLIER = 2.5  # stop = entry - 2.5*ATR (Widened to survive noise)
-ATR_TP_MULTIPLIER = 5.0  # target = entry + 5*ATR (Aiming for 1:2 RRR minimum)
-TRAIL_ACTIVATION = 3.0   # activate trailing after 3*ATR profit (gives trade room)
-TRAIL_DISTANCE = 2.5     # trail stop by 2.5*ATR once activated (widened to let winners run)
-MAX_POSITIONS = 5        # max simultaneous positions (synced with live engine to save transaction costs)
+# Configuration (V3.6)
+RISK_PER_TRADE      = 0.01   # V3.6: dialled from 3% → 1% during tuning phase.
+                              # Restore to 0.02 once system shows +expectancy over 50+ trades.
+ATR_SL_MULTIPLIER   = 2.5    # stop = entry - 2.5*ATR (widened to survive noise)
+ATR_TP_MULTIPLIER   = 5.0    # target = entry + 5*ATR (aims for 1:2 RRR minimum)
+TRAIL_ACTIVATION    = 3.0    # activate trailing after 3*ATR profit
+TRAIL_DISTANCE      = 2.5    # trail stop by 2.5*ATR once activated
+MAX_POSITIONS       = 5      # max simultaneous positions
+MAX_COST_TO_RISK    = 0.20   # V3.6: reject if charges > 20% of planned risk amount
+                              # Data: avg charges were 46% of risk — far too expensive.
 
 
 @dataclass
@@ -114,6 +116,16 @@ def plan_position(
         quantity = int((capital * 0.33) / entry_price)
         if quantity <= 0:
             return None
+
+    # V3.6: Cost-to-Risk Gate
+    # Estimate round-trip charges for this trade: STT (0.1% buy+sell) + stamp (0.015%)
+    # + exchange txn (0.00345%) + SEBI (0.0001%) + DP flat ₹15.93 + slippage (0.075%)
+    # Simplified: ~0.2% of trade value + ₹15.93 DP charge
+    trade_value = entry_price * quantity
+    estimated_charges = (trade_value * 0.002) + 15.93
+    if estimated_charges / risk_amount > MAX_COST_TO_RISK:
+        # Charges eat too much of the planned risk budget — not worth taking
+        return None
 
     return PositionPlan(
         stock=stock,

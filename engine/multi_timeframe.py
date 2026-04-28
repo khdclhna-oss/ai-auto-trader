@@ -253,8 +253,10 @@ def analyze_15min(df: pd.DataFrame) -> TimeframeBias:
                 strength += 0.3
                 reasons.append(f"Volume spike ({vol_ratio:.1f}x average)")
             elif vol_ratio < 0.5:
-                strength *= 0.5  # low volume = weak signal
-                reasons.append(f"Low volume ({vol_ratio:.1f}x average)")
+                # V3.5: Hard reject — no institutional participation to confirm the move
+                direction = 0
+                strength = 0.0
+                reasons.append(f"LOW VOLUME REJECT ({vol_ratio:.1f}x avg) — signal killed")
 
     # VWAP Institutional Anchoring
     if "volume" in df.columns:
@@ -298,7 +300,9 @@ def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:
     hourly = analyze_hourly(frames.get("1h", pd.DataFrame()))
     quarter = analyze_15min(frames.get("15m", pd.DataFrame()))
 
-    # Time-of-Day Chop Filter (11:30 to 13:30 IST)
+    # V3.5: Time-of-Day Hard Block
+    # Data shows ≤8h holds have 22-25% WR and cause 59% of losses.
+    # Block entries during mid-day chop and late session.
     df_15 = frames.get("15m", pd.DataFrame())
     time_penalty = 0
     chop_reason = None
@@ -308,9 +312,15 @@ def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:
             hour = last_time.hour
             minute = last_time.minute
             time_in_mins = hour * 60 + minute
-            if 11 * 60 + 30 <= time_in_mins <= 13 * 60 + 30:
+            # IST offset: yfinance returns UTC, IST = UTC + 5:30
+            # 11:30 IST = 06:00 UTC, 13:30 IST = 08:00 UTC, 14:00 IST = 08:30 UTC
+            ist_mins = time_in_mins + 5 * 60 + 30
+            if 11 * 60 + 30 <= ist_mins <= 13 * 60 + 30:
                 time_penalty = -1
-                chop_reason = "Mid-day Chop Filter (11:30-13:30) active"
+                chop_reason = "Mid-day Chop Filter (11:30-13:30 IST) — HARD BLOCK"
+            elif ist_mins >= 14 * 60:  # After 14:00 IST — no new entries
+                time_penalty = -1
+                chop_reason = "Late Session Filter (after 14:00 IST) — HARD BLOCK"
         except Exception:
             pass
 
@@ -319,15 +329,20 @@ def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:
     
     if chop_reason:
         all_reasons.append(chop_reason)
-
-    # Regime-adaptive thresholds
-    # V2.1: RANGING regime = no trades. Momentum strategies need a trend.
-    if regime == "RANGING":
-        # Don't trade in directionless markets — edge disappears
+        # V3.5: Hard block — force HOLD during chop/late session
         return ConfluenceResult(
             stock=stock, daily=daily, hourly=hourly, quarter=quarter,
             confluence_score=confluence, action="HOLD",
-            regime=regime, reasons=all_reasons + ["RANGING regime — no trades"],
+            regime=regime, reasons=all_reasons,
+        )
+
+    # Regime-adaptive thresholds
+    # V3.5: RANGING regime = HARD BLOCK. Data: 23.1% WR, -₹2,271 total, 42% of all trades.
+    if regime == "RANGING":
+        return ConfluenceResult(
+            stock=stock, daily=daily, hourly=hourly, quarter=quarter,
+            confluence_score=confluence, action="HOLD",
+            regime=regime, reasons=all_reasons + ["RANGING regime — HARD BLOCK (23% WR in data)"],
         )
 
     # TRENDING or VOLATILE: require all 3 timeframes aligned + strict confluence

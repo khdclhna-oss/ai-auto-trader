@@ -113,6 +113,17 @@ class Database:
             self.conn.rollback()
             print(f"Failed to snapshot equity: {e}")
 
+    def get_last_loss_time(self, stock: str):
+        """Returns the exit_time of the most recent losing trade for this stock, or None."""
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT exit_time FROM trades
+                WHERE stock = %s AND status = 'CLOSED' AND pnl < 0
+                ORDER BY exit_time DESC LIMIT 1
+            """, (stock,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
     def get_held_stocks(self) -> set:
         """Returns a set of symbols currently held."""
         with self.conn.cursor() as cur:

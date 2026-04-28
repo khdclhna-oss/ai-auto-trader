@@ -209,6 +209,27 @@ def run():
 
             # Execution
             if sig.final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS:
+                # V3.5 Guard 1: RANGING regime double-check at execution time
+                # Data: 13 RANGING trades, 23.1% WR, -₹2,271 total
+                if sig.regime == "RANGING":
+                    print(f"  ⛔ {short_name}: RANGING regime — BUY blocked")
+                    continue
+
+                # V3.5 Guard 2: 24h cooldown after losing exit on same symbol
+                # Data: AXISBANK re-entered 1.5h after loss, lost ₹651 more
+                last_loss_at = db.get_last_loss_time(symbol)
+                if last_loss_at:
+                    try:
+                        # DB returns timezone-aware TIMESTAMPTZ; compare in UTC
+                        now_utc = datetime.now(timezone.utc)
+                        loss_utc = last_loss_at if last_loss_at.tzinfo else last_loss_at.replace(tzinfo=timezone.utc)
+                        cooldown_hours = (now_utc - loss_utc).total_seconds() / 3600
+                    except Exception:
+                        cooldown_hours = 999  # fail-open: allow trade if time math breaks
+                    if cooldown_hours < 24:
+                        print(f"  ⏳ {short_name}: 24h cooldown active ({cooldown_hours:.1f}h since last loss)")
+                        continue
+
                 plan = sig.plan
                 if plan and plan.quantity > 0:
                     cost = sig.price * plan.quantity

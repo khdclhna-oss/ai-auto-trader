@@ -24,10 +24,11 @@ from regime import detect_regime
 from risk_manager import plan_position
 
 # ─── Constants (single source of truth, synced with trader.py) ────────────────
-BUY_THRESHOLD  = 4    # minimum sentiment-adjusted score to enter a trade
+BUY_THRESHOLD  = 5    # V3.5: raised from 4. Score-4 trades: 33% WR, -₹3,448 total.
 SELL_THRESHOLD = -2   # score at which a held position gets a confluence sell
 PRICE_SANITY_PCT = 20  # reject bars with >20% change (split/stale data guard)
 GAP_SLIPPAGE   = 0.001  # 0.1% extra fill haircut for gap-through exits
+MIN_TARGET_PCT = 2.0   # V3.5: minimum target move % to justify charges (~0.40% breakeven)
 
 
 def _default_sentiment(symbol: str) -> float:
@@ -164,6 +165,14 @@ def evaluate_signal(
             capital=capital,
             regime=regime_result.regime,
         )
+        # V3.5: Minimum expected-move filter
+        # If the target can't move > MIN_TARGET_PCT from entry, charges eat the edge
+        if plan is not None:
+            target_move_pct = (plan.target - plan.entry_price) / plan.entry_price * 100
+            if target_move_pct < MIN_TARGET_PCT:
+                reason_str += f" | TARGET TOO SMALL ({target_move_pct:.1f}% < {MIN_TARGET_PCT}%) — SKIPPED"
+                final_action = "HOLD"
+                plan = None
 
     return SignalResult(
         symbol=symbol,

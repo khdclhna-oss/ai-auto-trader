@@ -26,8 +26,8 @@ ATR_TP_MULTIPLIER   = 5.0    # target = entry + 5*ATR (aims for 1:2 RRR minimum)
 TRAIL_ACTIVATION    = 3.0    # activate trailing after 3*ATR profit
 TRAIL_DISTANCE      = 2.5    # trail stop by 2.5*ATR once activated
 MAX_POSITIONS       = 5      # max simultaneous positions
-MAX_COST_TO_RISK    = 0.20   # V3.6: reject if charges > 20% of planned risk amount
-                              # Data: avg charges were 46% of risk — far too expensive.
+MAX_COST_TO_RISK    = 0.15   # V4.0: reject if charges > 15% of planned risk amount
+                              # Data: avg charges were >50% of gross P&L — tightened from 20%.
 
 
 @dataclass

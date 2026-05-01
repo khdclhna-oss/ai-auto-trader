@@ -24,7 +24,7 @@ from regime import detect_regime
 from risk_manager import plan_position
 
 # ─── Constants (single source of truth, synced with trader.py) ────────────────
-BUY_THRESHOLD  = 5    # V3.5: raised from 4. Score-4 trades: 33% WR, -₹3,448 total.
+BUY_THRESHOLD  = 6    # V4.0: raised from 5. Score-4/5 trades were primarily noise.
 SELL_THRESHOLD = -2   # score at which a held position gets a confluence sell
 PRICE_SANITY_PCT = 20  # reject bars with >20% change (split/stale data guard)
 GAP_SLIPPAGE   = 0.001  # 0.1% extra fill haircut for gap-through exits

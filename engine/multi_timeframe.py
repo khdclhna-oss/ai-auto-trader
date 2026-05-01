@@ -282,8 +282,10 @@ def analyze_15min(df: pd.DataFrame) -> TimeframeBias:
                     direction -= 1  # punish, institutions taking profit here
                     reasons.append(f"Price extended above VWAP (+{pct_from_vwap:.2f}%)")
                 elif curr_close < curr_vwap:
-                    direction -= 1
-                    reasons.append(f"Price below VWAP (-{abs(pct_from_vwap):.2f}%)")
+                    # V4: Hard reject — no institutional support
+                    direction = 0
+                    strength = 0.0
+                    reasons.append(f"VWAP REJECT (Price below VWAP by {abs(pct_from_vwap):.2f}%) — signal killed")
         except Exception:
             pass
 

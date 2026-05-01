@@ -77,8 +77,35 @@ def get_conn():
 
 
 def is_market_open() -> bool:
+    """Checks if today is a weekday and not an NSE holiday, and within market hours."""
     now_ist = datetime.now(IST)
-    if now_ist.weekday() >= 5: return False
+    
+    # 1. Weekend check
+    if now_ist.weekday() >= 5: 
+        return False
+        
+    # 2. NSE Holiday Check 2026
+    # Source: NSE India official holiday list
+    holidays_2026 = [
+        "2026-01-26", # Republic Day
+        "2026-03-06", # Holi
+        "2026-03-27", # Ramzan Id
+        "2026-04-02", # Mahavir Jayanti
+        "2026-04-03", # Good Friday
+        "2026-04-10", # Ambedkar Jayanti
+        "2026-05-01", # Maharashtra Day / May Day
+        "2026-10-02", # Mahatma Gandhi Jayanti
+        "2026-10-21", # Dussehra
+        "2026-11-05", # Diwali-Laxmi Pujan
+        "2026-11-25", # Guru Nanak Jayanti
+        "2026-12-25", # Christmas
+    ]
+    
+    today_str = now_ist.strftime("%Y-%m-%d")
+    if today_str in holidays_2026:
+        return False
+
+    # 3. Time check (09:15 - 15:30)
     market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
     market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
     return market_open <= now_ist <= market_close
@@ -182,7 +209,7 @@ def run():
         macro = get_macro_state(use_cache=True)
         if not macro.tradeable:
             print(f"  🚫 MACRO FILTER BLOCKED: {macro.reason}")
-            send_telegram_alert(f"🚫 Macro blocked: {macro.reason}")
+            # send_telegram_alert(f"🚫 Macro blocked: {macro.reason}")
             finish_log('MARKET_CLOSED', error_msg=f"Macro filter: {macro.reason}")
             return
         print(f"  ✅ Macro clear | Nifty200EMA={'✅' if macro.nifty_above_200ema else '❌'} "
@@ -331,7 +358,9 @@ def run():
                         send_telegram_alert(f"🟢 BUY: {short_name} @ ₹{sig.price:.2f}")
 
                         try:
-                            db.execute_buy(symbol, plan.quantity, sig.price, plan.stop_loss, plan.target, sig.reason_str, sig.confluence_score, sig.regime, sig.atr, sig.sentiment_score)
+                            db.execute_buy(symbol, plan.quantity, sig.price, plan.stop_loss, 
+                                           plan.target_1, plan.target_2, plan.target_3,
+                                           sig.reason_str, sig.confluence_score, sig.regime, sig.atr, sig.sentiment_score)
                             open_count += 1
                             cash -= cost
                             held_stocks.add(symbol)
@@ -362,14 +391,16 @@ def run():
             print(f"  ❌ Error {short_name}: {e}")
 
     # ─── 2. Manage Open Positions (Intrabar + Trailing) ──────────
-    print(f"  Checking open positions...")
+    print(f"  Checking open positions (V4.1 Tranche Model)...")
     open_pos_snapshot = db.get_open_positions()
     for pos in open_pos_snapshot:
         stock = pos["stock"]
         qty = int(pos["quantity"])
+        orig_qty = int(pos["original_quantity"])
         entry = float(pos["entry_price"])
         sl = float(pos["stop_loss"])
-        target = float(pos["target"])
+        t1, t2, t3 = float(pos["target_1"]), float(pos["target_2"]), float(pos["target_3"])
+        tx = int(pos["tranches_exited"])
 
         try:
             frames = universe_data.get(stock, {})
@@ -379,31 +410,67 @@ def run():
             curr = df.iloc[-1]
             price = float(curr["close"])
             
-            # SL/TP Exit
-            ext = apply_intrabar_exit(curr, entry, sl, target, qty, None, now)
-            if ext:
-                fp, etype = ext["fill_price"], ext["type"]
-                c = calculate_realistic_charges(entry, fp, qty, False)
-                print(f"  🛑 {etype} hit for {stock} at ₹{fp:.2f}")
-                send_telegram_alert(f"🛑 {etype} hit for {stock} at ₹{fp:.2f}")
-
-                db.execute_sell(stock, qty, entry, fp, c.net_pnl, c.total)
-                proceeds = fp * qty - c.total
+            # --- 1. FULL STOP LOSS CHECK ---
+            if price <= sl:
+                c = calculate_realistic_charges(entry, price, qty, False)
+                print(f"  🛑 STOP LOSS hit for {stock} at ₹{price:.2f}")
+                send_telegram_alert(f"🛑 STOP LOSS hit for {stock} at ₹{price:.2f} | Final PnL: ₹{c.net_pnl:+.2f}")
+                db.execute_sell(stock, qty, entry, price, c.net_pnl, c.total)
+                cash += (price * qty - c.total)
                 open_count -= 1
-                cash += proceeds
                 held_stocks.discard(stock)
-                trades_total += 1
                 continue
 
-            # Trailing
-            atr = calculate_atr(df) or (price * 0.01)
-            regime_src = frames.get("1d")
-            if regime_src is None or regime_src.empty:
-                regime_src = df
-            adx = detect_regime(regime_src).adx
-            upd = check_trailing_stop(stock, entry, price, sl, atr, adx)
-            if upd.should_update:
-                db.update_trailing_stop(stock, upd.new_stop)
+            # --- 2. TRANCHE TARGET CHECKS ---
+            # Tranche 1: 40% exit at 1:1 R/R
+            if tx < 1 and price >= t1:
+                t1_qty = int(orig_qty * 0.4)
+                if t1_qty > 0:
+                    c = calculate_realistic_charges(entry, price, t1_qty, False)
+                    print(f"  🎯 TRANCHE 1 hit for {stock} at ₹{price:.2f} (Moved SL to Break-Even)")
+                    send_telegram_alert(f"🎯 TRANCHE 1 hit for {stock} at ₹{price:.2f} | PnL: ₹{c.net_pnl:+.2f}\n🛡 SL moved to Break-Even (₹{entry:.2f})")
+                    db.execute_partial_sell(stock, t1_qty, entry, price, c.net_pnl, c.total, 1)
+                    db.update_trailing_stop(stock, entry) # Elevate SL to Entry
+                    cash += (price * t1_qty - c.total)
+                    # Refresh local state for next tranches in same loop if needed
+                    qty -= t1_qty
+                    tx = 1
+                    sl = entry 
+
+            # Tranche 2: 40% exit at 1:2 R/R
+            if tx < 2 and price >= t2:
+                t2_qty = int(orig_qty * 0.4)
+                if t2_qty > 0 and qty >= t2_qty:
+                    c = calculate_realistic_charges(entry, price, t2_qty, False)
+                    print(f"  🎯 TRANCHE 2 hit for {stock} at ₹{price:.2f} (Moved SL to T1)")
+                    send_telegram_alert(f"🎯 TRANCHE 2 hit for {stock} at ₹{price:.2f} | PnL: ₹{c.net_pnl:+.2f}\n🛡 SL moved to T1 (₹{t1:.2f})")
+                    db.execute_partial_sell(stock, t2_qty, entry, price, c.net_pnl, c.total, 2)
+                    db.update_trailing_stop(stock, t1) # Elevate SL to T1
+                    cash += (price * t2_qty - c.total)
+                    qty -= t2_qty
+                    tx = 2
+                    sl = t1
+
+            # Tranche 3: Runner (20%) exit at Target 3 or Trailing Stop
+            if tx >= 2:
+                if price >= t3:
+                    # Final target hit
+                    c = calculate_realistic_charges(entry, price, qty, False)
+                    print(f"  🏁 RUNNER Target hit for {stock} at ₹{price:.2f}")
+                    send_telegram_alert(f"🏁 RUNNER Target hit for {stock} at ₹{price:.2f} | Final PnL: ₹{c.net_pnl:+.2f}")
+                    db.execute_sell(stock, qty, entry, price, c.net_pnl, c.total)
+                    cash += (price * qty - c.total)
+                    open_count -= 1
+                    held_stocks.discard(stock)
+                    continue
+                else:
+                    # Standard trailing stop for the runner
+                    atr = calculate_atr(df) or (price * 0.01)
+                    regime_src = frames.get("1d") or df
+                    adx = detect_regime(regime_src).adx
+                    upd = check_trailing_stop(stock, entry, price, sl, atr, adx)
+                    if upd.should_update:
+                        db.update_trailing_stop(stock, upd.new_stop)
 
         except Exception as e:
             print(f"  ❌ Exit err {stock}: {e}")

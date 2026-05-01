@@ -32,11 +32,13 @@ MAX_COST_TO_RISK    = 0.15   # V4.0: reject if charges > 15% of planned risk amo
 
 @dataclass
 class PositionPlan:
-    """Complete trade plan with entry, stop, target, and sizing."""
+    """Complete trade plan with entry, stop, three targets, and sizing."""
     stock: str
     entry_price: float
     stop_loss: float
-    target: float
+    target_1: float  # 40% qty @ 1:1 RR
+    target_2: float  # 40% qty @ 1:2 RR
+    target_3: float  # 20% qty @ Runner
     quantity: int
     risk_amount: float
     atr: float
@@ -85,17 +87,19 @@ def plan_position(
 
     # Dynamic stop and target based on ATR
     sl_distance = ATR_SL_MULTIPLIER * atr
-    tp_distance = ATR_TP_MULTIPLIER * atr
     stop_loss = round(entry_price - sl_distance, 2)
-    target = round(entry_price + tp_distance, 2)
+    
+    # V4.1 Three-Tranche Targets
+    # T1: 1:1 R/R (Locks in profit, covers brokerage)
+    # T2: 1:2 R/R (The "Meat" of the move)
+    # T3: Runner (Captured with Trailing Stop)
+    target_1 = round(entry_price + (1.0 * sl_distance), 2)
+    target_2 = round(entry_price + (2.0 * sl_distance), 2)
+    target_3 = round(entry_price + (4.0 * sl_distance), 2) # Initial target, will trail
 
-    # Reward:risk ratio
-    rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0
-
-    # Only take trades with minimum 1.5:1 RR
-    if rr_ratio < 1.5:
-        return None
-
+    # Reward:risk ratio (blended for the first 2 tranches)
+    rr_ratio = (target_2 - entry_price) / sl_distance if sl_distance > 0 else 0
+    
     # Position sizing: risk_amount / stop_distance = quantity
     risk_amount = capital * RISK_PER_TRADE
     
@@ -107,20 +111,19 @@ def plan_position(
 
     quantity = int(risk_amount / sl_distance)
     
-    # Sanity checks
-    if quantity <= 0:
-        return None
+    # Ensure quantity is at least 3 to allow 40/40/20 split
+    if quantity < 3:
+        # If risk budget is too small for tranches, we ensure at least 3 shares if possible
+        quantity = 3
     
+    # Sanity checks
     total_cost = entry_price * quantity
     if total_cost > capital * 0.33:  # never deploy more than 33% in one trade
         quantity = int((capital * 0.33) / entry_price)
-        if quantity <= 0:
+        if quantity < 3:
             return None
 
     # V3.6: Cost-to-Risk Gate
-    # Estimate round-trip charges for this trade: STT (0.1% buy+sell) + stamp (0.015%)
-    # + exchange txn (0.00345%) + SEBI (0.0001%) + DP flat ₹15.93 + slippage (0.075%)
-    # Simplified: ~0.2% of trade value + ₹15.93 DP charge
     trade_value = entry_price * quantity
     estimated_charges = (trade_value * 0.002) + 15.93
     if estimated_charges / risk_amount > MAX_COST_TO_RISK:
@@ -131,7 +134,9 @@ def plan_position(
         stock=stock,
         entry_price=entry_price,
         stop_loss=stop_loss,
-        target=target,
+        target_1=target_1,
+        target_2=target_2,
+        target_3=target_3,
         quantity=quantity,
         risk_amount=risk_amount,
         atr=atr,

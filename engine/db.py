@@ -45,25 +45,31 @@ class Database:
             raise RuntimeError(f"Failed to log signal for {stock}: {e}")
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
-        """Fetch all open positions."""
+        """Fetch all open positions with V4.1 multi-target support."""
         with self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT stock, quantity, entry_price, stop_loss, target FROM open_positions")
+            cur.execute("""
+                SELECT stock, quantity, original_quantity, entry_price, stop_loss, 
+                       target_1, target_2, target_3, tranches_exited 
+                FROM open_positions
+            """)
             return [dict(r) for r in cur.fetchall()]
 
-    def execute_buy(self, stock: str, quantity: int, price: float, stop_loss: float, target: float, reason: str, confluence_score: int, regime: str, atr: float, sentiment_score: float):
-        """Atomically execute a BUY: insert position, insert trade, update portfolio."""
+    def execute_buy(self, stock: str, quantity: int, price: float, stop_loss: float, 
+                    t1: float, t2: float, t3: float,
+                    reason: str, confluence_score: int, regime: str, atr: float, sentiment_score: float):
+        """Atomically execute a V4.1 BUY: initialize tranches and targets."""
         cost = price * quantity
         try:
             with self.conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO open_positions (stock, quantity, entry_price, stop_loss, target, entry_time, reason)
-                    VALUES (%s, %s, %s, %s, %s, NOW(), %s)
-                """, (stock, quantity, price, stop_loss, target, reason))
+                    INSERT INTO open_positions (stock, quantity, original_quantity, entry_price, stop_loss, target_1, target_2, target_3, entry_time, reason)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+                """, (stock, quantity, quantity, price, stop_loss, t1, t2, t3, reason))
 
                 cur.execute("""
-                    INSERT INTO trades (stock, action, entry_price, quantity, reason, entry_time, status, confluence_score, regime, atr_at_entry, sentiment_score)
-                    VALUES (%s, 'BUY', %s, %s, %s, NOW(), 'OPEN', %s, %s, %s, %s)
-                """, (stock, price, quantity, reason, confluence_score, regime, atr, sentiment_score))
+                    INSERT INTO trades (stock, action, entry_price, quantity, original_quantity, reason, entry_time, status, confluence_score, regime, atr_at_entry, sentiment_score)
+                    VALUES (%s, 'BUY', %s, %s, %s, %s, NOW(), 'OPEN', %s, %s, %s, %s)
+                """, (stock, price, quantity, quantity, reason, confluence_score, regime, atr, sentiment_score))
 
                 cur.execute("UPDATE portfolio SET cash = cash - %s, invested = invested + %s, updated_at = NOW()", (cost, cost))
             self.conn.commit()
@@ -71,13 +77,45 @@ class Database:
             self.conn.rollback()
             raise RuntimeError(f"Failed to execute BUY for {stock}: {e}")
 
+    def execute_partial_sell(self, stock: str, qty_to_sell: int, entry_price: float, exit_price: float, net_pnl: float, charges: float, tranche_num: int):
+        """Atomically execute a PARTIAL SELL (Tranche exit)."""
+        proceeds = (exit_price * qty_to_sell) - charges
+        try:
+            with self.conn.cursor() as cur:
+                # 1. Update the open position: reduce quantity, increment tranches_exited
+                cur.execute("""
+                    UPDATE open_positions 
+                    SET quantity = quantity - %s, tranches_exited = %s
+                    WHERE stock = %s
+                """, (qty_to_sell, tranche_num, stock))
+
+                # 2. Log the partial exit in a new 'tranche_exits' table (or just update the trade log)
+                # For simplicity in V4.1, we update the master trade's current quantity and realized PnL
+                cur.execute("""
+                    UPDATE trades 
+                    SET quantity = quantity - %s, 
+                        pnl = COALESCE(pnl, 0) + %s, 
+                        charges = COALESCE(charges, 0) + %s
+                    WHERE stock = %s AND status = 'OPEN'
+                """, (qty_to_sell, net_pnl, charges, stock))
+
+                # 3. Update portfolio
+                cur.execute("""
+                    UPDATE portfolio 
+                    SET cash = cash + %s, invested = invested - %s, capital = capital + %s, pnl = pnl + %s, updated_at = NOW()
+                """, (proceeds, entry_price * qty_to_sell, net_pnl, net_pnl))
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            raise RuntimeError(f"Failed to execute PARTIAL SELL for {stock}: {e}")
+
     def execute_sell(self, stock: str, qty: int, entry_price: float, exit_price: float, net_pnl: float, charges: float):
-        """Atomically execute a SELL: delete position, close trade, update portfolio."""
+        """Atomically execute a FULL SELL: delete position, close trade, update portfolio."""
         proceeds = (exit_price * qty) - charges
         try:
             with self.conn.cursor() as cur:
                 cur.execute("""
-                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=%s, status='CLOSED', charges=%s
+                    UPDATE trades SET exit_price=%s, exit_time=NOW(), pnl=COALESCE(pnl, 0)+%s, status='CLOSED', charges=COALESCE(charges, 0)+%s
                     WHERE stock=%s AND status='OPEN'
                 """, (exit_price, net_pnl, charges, stock))
 

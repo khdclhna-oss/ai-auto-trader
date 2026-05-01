@@ -177,9 +177,10 @@ def evaluate_signal(
         # V3.5: Minimum expected-move filter
         # If the target can't move > MIN_TARGET_PCT from entry, charges eat the edge
         if plan is not None:
-            target_move_pct = (plan.target - plan.entry_price) / plan.entry_price * 100
+            # V4.1: Check if the primary target (Tranche 2) moves enough to justify charges
+            target_move_pct = (plan.target_2 - plan.entry_price) / plan.entry_price * 100
             if target_move_pct < MIN_TARGET_PCT:
-                reason_str += f" | TARGET TOO SMALL ({target_move_pct:.1f}% < {MIN_TARGET_PCT}%) — SKIPPED"
+                reason_str += f" | PRIMARY TARGET TOO SMALL ({target_move_pct:.1f}% < {MIN_TARGET_PCT}%) — SKIPPED"
                 final_action = "HOLD"
                 plan = None
 

@@ -81,7 +81,11 @@ def _fetch_nifty_state() -> dict:
                          progress=False, auto_adjust=True)
         if df is None or len(df) < 210:
             return result
-        df.columns = [c.lower() for c in df.columns]
+        # Handle both Index and MultiIndex column structures
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[1].lower() if len(c) > 1 else c[0].lower() for r in [df.columns] for c in r]
+        else:
+            df.columns = [c.lower() for c in df.columns]
 
         ema200 = ta.ema(df["close"], length=200)
         ema50  = ta.ema(df["close"], length=50)
@@ -95,14 +99,19 @@ def _fetch_nifty_state() -> dict:
             result["slope_up_50ema"] = float(clean.iloc[-1]) > float(clean.iloc[-6])
 
     except Exception as e:
+        import traceback
         print(f"  ⚠ [macro] Nifty fetch failed: {e}")
+        # traceback.print_exc()
 
     # India VIX
     try:
         vix_df = yf.download("^INDIAVIX", period="5d", interval="1d",
                               progress=False, auto_adjust=True)
         if vix_df is not None and len(vix_df) > 0:
-            vix_df.columns = [c.lower() for c in vix_df.columns]
+            if isinstance(vix_df.columns, pd.MultiIndex):
+                vix_df.columns = [c[1].lower() if len(c) > 1 else c[0].lower() for r in [vix_df.columns] for c in r]
+            else:
+                vix_df.columns = [c.lower() for c in vix_df.columns]
             vix_val = float(vix_df["close"].dropna().iloc[-1])
             result["vix"] = vix_val
             result["vix_ok"] = vix_val < 20.0
@@ -133,7 +142,13 @@ def _compute_breadth(breadth_basket: list) -> float:
                 df = df_all[ticker].copy() if ticker in df_all else None
                 if df is None or len(df) < 55:
                     continue
-                df.columns = [c.lower() for c in df.columns]
+                
+                # Handle MultiIndex if necessary
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [c[1].lower() if len(c) > 1 else c[0].lower() for r in [df.columns] for c in r]
+                else:
+                    df.columns = [c.lower() for c in df.columns]
+
                 ema50 = ta.ema(df["close"], length=50)
                 if ema50 is None or ema50.isna().iloc[-1]:
                     continue

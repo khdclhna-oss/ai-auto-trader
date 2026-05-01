@@ -314,7 +314,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                 if plan and plan.quantity > 0 and plan.quantity * result.price <= cash:
                     held_positions[symbol] = {
                         "qty": plan.quantity, "entry": result.price,
-                        "sl": plan.stop_loss, "target": plan.target,
+                        "sl": plan.stop_loss, "target": plan.target_2,
                         "entry_time": date, "entry_idx": i, "fidelity": fidelity,
                         "confluence": result.confluence_score,
                         "sentiment": result.sentiment_score,

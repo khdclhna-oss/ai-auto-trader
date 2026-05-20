@@ -26,6 +26,10 @@ import argparse
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 
+# Force UTF-8 output on Windows to avoid cp1252 UnicodeEncodeError
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
@@ -183,7 +187,7 @@ def _print_segment(seg: SegmentMetrics):
     elif label == "DEGRADED":
         warn = "  ⚠ daily-only"
     print(f"\n  ── {label} MODE{warn} ────────────────────────────────")
-    print(f"  Period:        {seg.period_start} → {seg.period_end}")
+    print(f"  Period:        {seg.period_start} -> {seg.period_end}")
     print(f"  Trades:        {seg.total_trades}  ({seg.wins}W / {seg.losses}L)")
     print(f"  Win Rate:      {seg.win_rate:.1f}%")
     print(f"  Net P&L:       ₹{seg.net_pnl:+,.2f}")
@@ -412,7 +416,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
 
     # ── Print report ──────────────────────────────────────────────────────────
     print(f"\n{'='*65}")
-    print(f"  BACKTEST RESULTS  —  {result_obj.period_start} → {result_obj.period_end}")
+    print(f"  BACKTEST RESULTS  --  {result_obj.period_start} -> {result_obj.period_end}")
     print(f"  Total trades: {len(all_trades)}")
     print(f"  Final equity: ₹{equity_curve[-1]:,.2f}")
     print(f"{'='*65}")

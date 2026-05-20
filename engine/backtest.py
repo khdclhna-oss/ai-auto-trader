@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from signals import evaluate_signal, apply_intrabar_exit, _neutral_sentiment
 from calculator import calculate_realistic_charges
 
-# ── Universe ─────────────────────────────────────────────────────────────────
+# TATAMOTORS.NS, LTIM.NS, ZOMATO.NS removed — Yahoo Finance returns 404 for these tickers.
 STOCKS = [
     "ABB.NS", "ACC.NS", "ADANIENT.NS", "ADANIPORTS.NS", "ADANIPOWER.NS", "AMBUJACEM.NS",
     "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS",
@@ -46,13 +46,13 @@ STOCKS = [
     "HDFCLIFE.NS", "HAVELLS.NS", "HEROMOTOCO.NS", "HINDALCO.NS", "HAL.NS",
     "HINDUNILVR.NS", "ICICIBANK.NS", "ICICIGI.NS", "ICICIPRULI.NS", "ITC.NS",
     "INDHOTEL.NS", "IOC.NS", "IRCTC.NS", "INDUSINDBK.NS", "INFY.NS", "INDIGO.NS",
-    "JSWSTEEL.NS", "JINDALSTEL.NS", "KOTAKBANK.NS", "LTIM.NS", "LT.NS", "M&M.NS",
+    "JSWSTEEL.NS", "JINDALSTEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
     "MARICO.NS", "MARUTI.NS", "NTPC.NS", "NESTLEIND.NS", "ONGC.NS", "PIDILITIND.NS",
     "PFC.NS", "POWERGRID.NS", "PNB.NS", "RECLTD.NS", "RELIANCE.NS", "SBICARD.NS",
     "SBILIFE.NS", "SBIN.NS", "SRF.NS", "SHREECEM.NS", "SHRIRAMFIN.NS", "SIEMENS.NS",
-    "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS", "TATAPOWER.NS", "TATASTEEL.NS",
+    "SUNPHARMA.NS", "TATACONSUM.NS", "TATAPOWER.NS", "TATASTEEL.NS",
     "TCS.NS", "TECHM.NS", "TITAN.NS", "TRENT.NS", "TVSMOTOR.NS", "ULTRACEMCO.NS",
-    "UNITDSPR.NS", "VBL.NS", "VEDL.NS", "WIPRO.NS", "ZOMATO.NS", "ZYDUSLIFE.NS",
+    "UNITDSPR.NS", "VBL.NS", "VEDL.NS", "WIPRO.NS", "ETERNAL.NS", "ZYDUSLIFE.NS",
     "BHEL.NS", "IDFCFIRSTB.NS", "IRFC.NS", "JIOFIN.NS", "LODHA.NS", "OFSS.NS",
     "PAGEIND.NS", "TATACOMM.NS", "ADANIENSOL.NS", "ADANIGREEN.NS", "ATGL.NS",
     "BAJAJHLDNG.NS",
@@ -202,7 +202,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
 
     print(f"\n{'='*65}")
     print(f"  QuantumTrader V3 — Unified Backtest (DAILY_PROXY mode)")
-    print(f"  Period: {period} | Stocks: {len(STOCKS)} | Capital: ₹{INITIAL_CAPITAL:,}")
+    print(f"  Period: {period} | Stocks: {len(STOCKS)} | Capital: Rs {INITIAL_CAPITAL:,}")
     print(f"  Mode: DAILY_PROXY (daily bars reused for 1d / 1h / 15m inputs)")
     print(f"{'='*65}\n")
 
@@ -215,24 +215,55 @@ def run_backtest(period: str = "2y") -> BacktestResult:
 
     proxy_daily_returns: List[float] = []
 
-    # ── Fetch data ────────────────────────────────────────────────────────────
-    daily_data: dict = {}   # symbol -> daily df
-    for symbol in STOCKS:
-        short = symbol.replace(".NS", "")
-        try:
-            df = yf.download(symbol, period=period, interval="1d", progress=False)
-            df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
-            df = df.dropna()
-            if len(df) < 200:
-                print(f"  {short}: skipped ({len(df)} bars)")
-                continue
-            daily_data[symbol] = df
-            print(f"  {short}: ✓ {len(df)} daily bars")
-        except Exception as e:
-            print(f"  {short}: ✗ {e}")
+    # ── Batch fetch all data in a single request ──────────────────────────────────────
+    # Single yf.download(tickers=[...]) is ~20x faster than a per-stock loop
+    # because yfinance batches them into one HTTP request.
+    daily_data: dict = {}
+    print(f"  Batch downloading {len(STOCKS)} stocks...")
+    try:
+        raw = yf.download(
+            STOCKS, period=period, interval="1d",
+            progress=True, group_by="ticker", auto_adjust=True,
+        )
+        for symbol in STOCKS:
+            short = symbol.replace(".NS", "")
+            try:
+                if len(STOCKS) == 1:
+                    df = raw.copy()
+                elif symbol in raw.columns.get_level_values(0):
+                    df = raw[symbol].copy()
+                else:
+                    print(f"  {short}: skipped (not in batch response)")
+                    continue
+                df.columns = [c.lower() for c in df.columns]
+                df = df.dropna(subset=["close"])
+                if len(df) < 200:
+                    print(f"  {short}: skipped ({len(df)} bars < 200 minimum)")
+                    continue
+                daily_data[symbol] = df
+                print(f"  {short}: OK {len(df)} daily bars")
+            except Exception as exc:
+                print(f"  {short}: ERR parsing — {exc}")
+    except Exception as e:
+        print(f"  Batch download failed: {e}")
+        # Fallback: individual downloads
+        print(f"  Falling back to individual downloads...")
+        for symbol in STOCKS:
+            short = symbol.replace(".NS", "")
+            try:
+                df = yf.download(symbol, period=period, interval="1d", progress=False, auto_adjust=True)
+                df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
+                df = df.dropna()
+                if len(df) < 200:
+                    print(f"  {short}: skipped ({len(df)} bars)")
+                    continue
+                daily_data[symbol] = df
+                print(f"  {short}: OK {len(df)} daily bars")
+            except Exception as exc:
+                print(f"  {short}: ERR {exc}")
 
     if not daily_data:
-        print("  ❌ No valid data.")
+        print("  [X] No valid data.")
         return BacktestResult("", "", [], [])
 
     all_dates = None
@@ -241,7 +272,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
         all_dates = d if all_dates is None else all_dates.intersection(d)
     sorted_dates = sorted(all_dates)
 
-    print(f"\n  Common period: {sorted_dates[0].strftime('%Y-%m-%d')} → {sorted_dates[-1].strftime('%Y-%m-%d')}")
+    print(f"\n  Common period: {sorted_dates[0].strftime('%Y-%m-%d')} -> {sorted_dates[-1].strftime('%Y-%m-%d')}")
     print(f"  Trading days:  {len(sorted_dates)}\n")
 
     # ── Day-by-day simulation ─────────────────────────────────────────────────

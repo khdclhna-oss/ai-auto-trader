@@ -23,11 +23,12 @@ import io
 import time
 import traceback
 from datetime import datetime, timezone, timedelta
+import psycopg2
 from db import Database
 from tenacity import retry, wait_fixed, stop_after_attempt
 from regime import detect_regime
 from risk_manager import (
-    calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS
+    calculate_atr, plan_position, check_trailing_stop, MAX_POSITIONS, RISK_PER_TRADE
 )
 from calculator import calculate_realistic_charges
 from alerts import send_telegram_alert
@@ -40,18 +41,20 @@ from kelly import get_kelly_from_db
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# TATAMOTORS.NS, LTIM.NS, ZOMATO.NS removed — Yahoo Finance returns 404 (no data) for these tickers.
+# Use TATAMOTORS-DVR.NS is no longer traded; ZOMATO trades as ETERNAL.NS from Apr 2025.
 STOCKS = [
-    "ABB.NS", "ACC.NS", "ADANIENT.NS", "ADANIPORTS.NS", "ADANIPOWER.NS", "AMBUJACEM.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", 
-    "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS", "BANKBARODA.NS", "BEL.NS", "BHARTIARTL.NS", "BPCL.NS", 
-    "BRITANNIA.NS", "CANBK.NS", "CHOLAFIN.NS", "CIPLA.NS", "COALINDIA.NS", "COLPAL.NS", "CONCOR.NS", "DLF.NS", "DABUR.NS", 
-    "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS", "GAIL.NS", "GODREJCP.NS", "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", 
-    "HDFCLIFE.NS", "HAVELLS.NS", "HEROMOTOCO.NS", "HINDALCO.NS", "HAL.NS", "HINDUNILVR.NS", "ICICIBANK.NS", "ICICIGI.NS", 
-    "ICICIPRULI.NS", "ITC.NS", "INDHOTEL.NS", "IOC.NS", "IRCTC.NS", "INDUSINDBK.NS", "INFY.NS", "INDIGO.NS", "JSWSTEEL.NS", 
-    "JINDALSTEL.NS", "KOTAKBANK.NS", "LTIM.NS", "LT.NS", "M&M.NS", "MARICO.NS", "MARUTI.NS", "NTPC.NS", "NESTLEIND.NS", 
-    "ONGC.NS", "PIDILITIND.NS", "PFC.NS", "POWERGRID.NS", "PNB.NS", "RECLTD.NS", "RELIANCE.NS", "SBICARD.NS", "SBILIFE.NS", 
-    "SBIN.NS", "SRF.NS", "SHREECEM.NS", "SHRIRAMFIN.NS", "SIEMENS.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS", 
-    "TATAPOWER.NS", "TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS", "TRENT.NS", "TVSMOTOR.NS", "ULTRACEMCO.NS", "UNITDSPR.NS", 
-    "VBL.NS", "VEDL.NS", "WIPRO.NS", "ZOMATO.NS", "ZYDUSLIFE.NS", "BHEL.NS", "IDFCFIRSTB.NS", "IRFC.NS", "JIOFIN.NS", 
+    "ABB.NS", "ACC.NS", "ADANIENT.NS", "ADANIPORTS.NS", "ADANIPOWER.NS", "AMBUJACEM.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS",
+    "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS", "BANKBARODA.NS", "BEL.NS", "BHARTIARTL.NS", "BPCL.NS",
+    "BRITANNIA.NS", "CANBK.NS", "CHOLAFIN.NS", "CIPLA.NS", "COALINDIA.NS", "COLPAL.NS", "CONCOR.NS", "DLF.NS", "DABUR.NS",
+    "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS", "GAIL.NS", "GODREJCP.NS", "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS",
+    "HDFCLIFE.NS", "HAVELLS.NS", "HEROMOTOCO.NS", "HINDALCO.NS", "HAL.NS", "HINDUNILVR.NS", "ICICIBANK.NS", "ICICIGI.NS",
+    "ICICIPRULI.NS", "ITC.NS", "INDHOTEL.NS", "IOC.NS", "IRCTC.NS", "INDUSINDBK.NS", "INFY.NS", "INDIGO.NS", "JSWSTEEL.NS",
+    "JINDALSTEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS", "MARICO.NS", "MARUTI.NS", "NTPC.NS", "NESTLEIND.NS",
+    "ONGC.NS", "PIDILITIND.NS", "PFC.NS", "POWERGRID.NS", "PNB.NS", "RECLTD.NS", "RELIANCE.NS", "SBICARD.NS", "SBILIFE.NS",
+    "SBIN.NS", "SRF.NS", "SHREECEM.NS", "SHRIRAMFIN.NS", "SIEMENS.NS", "SUNPHARMA.NS", "TATACONSUM.NS",
+    "TATAPOWER.NS", "TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS", "TRENT.NS", "TVSMOTOR.NS", "ULTRACEMCO.NS", "UNITDSPR.NS",
+    "VBL.NS", "VEDL.NS", "WIPRO.NS", "ETERNAL.NS", "ZYDUSLIFE.NS", "BHEL.NS", "IDFCFIRSTB.NS", "IRFC.NS", "JIOFIN.NS",
     "LODHA.NS", "OFSS.NS", "PAGEIND.NS", "TATACOMM.NS", "ADANIENSOL.NS", "ADANIGREEN.NS", "ATGL.NS", "BAJAJHLDNG.NS"
 ]
 # DATABASE_URL is read lazily inside db.py to avoid crashing at import time.
@@ -73,7 +76,7 @@ class TeeLogger:
 
 @retry(wait=wait_fixed(5), stop=stop_after_attempt(3))
 def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(os.environ["DATABASE_URL"])
 
 
 def is_market_open() -> bool:
@@ -188,7 +191,7 @@ def run():
         except Exception: pass
 
     now = datetime.now(IST)
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] QuantumTrader Engine V3")
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] QuantumTrader Engine V4")
 
     try:
         db = Database()
@@ -197,26 +200,24 @@ def run():
         finish_log('ERROR', error_msg=f"Database connection failed: {e}")
         return
 
-    if not is_market_open():
-        print(f"  Wait: Market closed.")
+    # ─── Determine trading mode ────────────────────────────────────────────────
+    # EXIT MANAGEMENT always runs (any weekday, 9:00-17:30 IST) to handle SL/targets.
+    # NEW ENTRIES only fire when market is open AND macro is clear.
+    # This is the critical fix: the old code did an early `return` on market-closed
+    # or macro-blocked, which completely bypassed stop-loss and target management.
+    now_ist = datetime.now(IST)
+    is_weekday = now_ist.weekday() < 5
+    exit_window_open = is_weekday and (
+        now_ist.hour >= 9 and (now_ist.hour < 17 or (now_ist.hour == 17 and now_ist.minute <= 30))
+    )
+    market_open = is_market_open()
+    allow_new_entries = market_open  # will be further gated by macro below
+
+    if not exit_window_open:
+        # Truly outside hours — nothing to do
+        print(f"  Outside active window. Exiting.")
         finish_log('MARKET_CLOSED')
         return
-
-    # ─── V4 Layer 1: Macro Filter ─────────────────────────────────────────────
-    # Don't trade individual stocks when the index is broken.
-    # 70-80% of NSE large-cap moves are explained by index direction.
-    try:
-        macro = get_macro_state(use_cache=True)
-        if not macro.tradeable:
-            print(f"  🚫 MACRO FILTER BLOCKED: {macro.reason}")
-            # send_telegram_alert(f"🚫 Macro blocked: {macro.reason}")
-            finish_log('MARKET_CLOSED', error_msg=f"Macro filter: {macro.reason}")
-            return
-        print(f"  ✅ Macro clear | Nifty200EMA={'✅' if macro.nifty_above_200ema else '❌'} "
-              f"| 50EMA slope={'✅' if macro.nifty_50ema_slope_up else '❌'} "
-              f"| VIX={macro.vix:.1f} | Breadth={macro.breadth_pct:.0f}%")
-    except Exception as e:
-        print(f"  ⚠ Macro filter failed (fail-open): {e}")
 
     try:
         portfolio = db.get_portfolio()
@@ -230,64 +231,129 @@ def run():
     held_stocks = db.get_held_stocks()
     open_count = len(held_stocks)
 
-    # ─── V4 Layer 2: Sector Rotation ─────────────────────────────────────────
-    # Only trade stocks in sectors showing positive momentum.
+    # ─── V4 Layer 1: Macro Filter (gates NEW entries only) ────────────────────
+    macro_blocked = False
     allowed_sectors = None
-    try:
-        allowed_sectors = get_allowed_sectors(top_n_fraction=0.5, use_cache=True)
-    except Exception as e:
-        print(f"  ⚠ Sector rotation failed (fail-open, all sectors allowed): {e}")
+    if allow_new_entries:
+        try:
+            macro = get_macro_state(use_cache=True)
+            if not macro.tradeable:
+                macro_blocked = True
+                allow_new_entries = False
+                print(f"  🚫 MACRO FILTER BLOCKED: {macro.reason}")
+                print(f"  ℹ Exit management will still run for {open_count} open position(s).")
+            else:
+                print(f"  ✅ Macro clear | Nifty200EMA={'✅' if macro.nifty_above_200ema else '❌'} "
+                      f"| 50EMA slope={'✅' if macro.nifty_50ema_slope_up else '❌'} "
+                      f"| VIX={macro.vix:.1f} | Breadth={macro.breadth_pct:.0f}%")
+        except Exception as e:
+            print(f"  ⚠ Macro filter failed (fail-open): {e}")
 
-    # ─── V4 Kelly Monitor ────────────────────────────────────────────────────
-    # Always show the live Kelly state — informs whether to size up or halt.
-    try:
-        kelly = get_kelly_from_db(db)
-        if not kelly.has_edge:
-            print(f"  ⚠ [kelly] System has NO positive edge yet ({kelly.sample_size} trades). "
-                  f"WR={kelly.win_rate:.0%}, Payoff={kelly.payoff_ratio:.2f}x — TUNING MODE")
-    except Exception as e:
-        print(f"  ⚠ Kelly computation failed: {e}")
+        # ─── V4 Layer 2: Sector Rotation ──────────────────────────────────────
+        if not macro_blocked:
+            try:
+                allowed_sectors = get_allowed_sectors(top_n_fraction=0.5, use_cache=True)
+            except Exception as e:
+                print(f"  ⚠ Sector rotation failed (fail-open, all sectors allowed): {e}")
 
-    # V3.6: Daily Loss Circuit Breaker (-2R guard)
-    # If today's realized losses exceed 2x avg risk per trade, stop new BUYs.
-    # Avg risk per trade @ 1% of ₹1,00,000 = ₹1,000 → -2R threshold = -₹2,000
-    DAILY_LOSS_LIMIT = -(capital * 0.01 * 2)  # -2R in rupees
-    daily_pnl = 0.0
-    daily_loss_limit_hit = False
-    try:
-        daily_pnl = db.get_today_realized_pnl()
-        if daily_pnl <= DAILY_LOSS_LIMIT:
-            daily_loss_limit_hit = True
-            print(f"  ⛔ DAILY LOSS GUARD: Today P&L ₹{daily_pnl:+.2f} ≤ -2R limit ₹{DAILY_LOSS_LIMIT:.2f}. No new BUYs today.")
-            send_telegram_alert(f"⛔ Daily loss guard hit: ₹{daily_pnl:+.2f}. Halting new entries.")
-    except Exception as e:
-        print(f"  ⚠ Could not check daily P&L: {e}")
+        # ─── V4 Kelly Monitor ─────────────────────────────────────────────────
+        try:
+            kelly = get_kelly_from_db(db)
+            if not kelly.has_edge:
+                print(f"  ⚠ [kelly] System has NO positive edge yet ({kelly.sample_size} trades). "
+                      f"WR={kelly.win_rate:.0%}, Payoff={kelly.payoff_ratio:.2f}x — TUNING MODE")
+        except Exception as e:
+            print(f"  ⚠ Kelly computation failed: {e}")
+
+        # ─── V4.2: Loss Circuit Breakers (gate NEW entries only) ──────────────
+        DAILY_LOSS_LIMIT = -(capital * RISK_PER_TRADE * 1.5)
+        WEEKLY_LOSS_LIMIT = -(capital * 0.03)
+        daily_loss_limit_hit = False
+        weekly_loss_limit_hit = False
+        performance_guard_hit = False
+        try:
+            daily_pnl = db.get_today_realized_pnl()
+            if daily_pnl <= DAILY_LOSS_LIMIT:
+                daily_loss_limit_hit = True
+                allow_new_entries = False
+                print(f"  ⛔ DAILY LOSS GUARD: Today P&L ₹{daily_pnl:+.2f} <= -1.5R limit ₹{DAILY_LOSS_LIMIT:.2f}. No new BUYs today.")
+                send_telegram_alert(f"⛔ Daily loss guard hit: ₹{daily_pnl:+.2f}. Halting new entries.")
+        except Exception as e:
+            print(f"  ⚠ Could not check daily P&L: {e}")
+            daily_loss_limit_hit = False
+
+        try:
+            weekly_pnl = db.get_week_realized_pnl()
+            if weekly_pnl <= WEEKLY_LOSS_LIMIT:
+                weekly_loss_limit_hit = True
+                allow_new_entries = False
+                print(f"  ⛔ WEEKLY LOSS GUARD: Week P&L ₹{weekly_pnl:+.2f} <= ₹{WEEKLY_LOSS_LIMIT:.2f}. No new BUYs this week.")
+                send_telegram_alert(f"⛔ Weekly loss guard hit: ₹{weekly_pnl:+.2f}. Halting new entries.")
+        except Exception as e:
+            print(f"  ⚠ Could not check weekly P&L: {e}")
+            weekly_loss_limit_hit = False
+
+        try:
+            recent = db.get_recent_system_stats(limit=20, risk_amount=capital * RISK_PER_TRADE)
+            if recent["sample_size"] >= 20 and (
+                recent["profit_factor"] < 0.8
+                or recent["expectancy_r"] < -0.25
+                or recent["max_loss_streak"] >= 6
+            ):
+                performance_guard_hit = True
+                allow_new_entries = False
+                print(
+                    f"  ⛔ PERFORMANCE GUARD: last {recent['sample_size']} trades "
+                    f"PF={recent['profit_factor']:.2f}, E={recent['expectancy_r']:+.2f}R, "
+                    f"loss streak={recent['max_loss_streak']}. New BUYs halted."
+                )
+        except Exception as e:
+            print(f"  ⚠ Could not check recent system stats: {e}")
+            performance_guard_hit = False
+    else:
+        # Market not open yet / after hours — still need to manage exits
+        print(f"  ℹ Market closed. Running exit management only for {open_count} open position(s).")
+        daily_loss_limit_hit = weekly_loss_limit_hit = performance_guard_hit = False
 
     signals_total = 0; trades_total = 0
     print(f"  Portfolio: ₹{capital:,.0f} | Cash: ₹{cash:,.0f} | Open: {open_count}/{MAX_POSITIONS}\n")
-    
-    universe_data = fetch_batch_universe(STOCKS)
-    if not universe_data:
-        finish_log('ERROR', error_msg="Batch fetch failed")
-        return
 
-    # ─── V4 Layer 3: Opportunity Ranking ─────────────────────────────────────
-    # Rank the full universe. Only evaluate the top-5 candidates in detail.
-    # This replaces the flat 100-stock scan with a selection-first approach.
-    try:
-        ranked_candidates = rank_universe(
-            universe_data=universe_data,
-            top_n=5,
-            allowed_sectors=allowed_sectors,
-        )
-        # For open positions, always check their management regardless of rank
-        ranked_symbols = {r.symbol for r in ranked_candidates}
-        held_symbols_to_check = held_stocks  # always manage exits
-        symbols_to_evaluate = list(ranked_symbols | held_symbols_to_check)
-        print(f"  🎯 V4: Evaluating {len(ranked_candidates)} ranked candidates + {len(held_stocks)} open positions")
-    except Exception as e:
-        print(f"  ⚠ Ranker failed (fail-open, using full universe): {e}")
-        symbols_to_evaluate = STOCKS
+    # ─── Smart data fetch: full universe OR held stocks only ──────────────────
+    # If new entries are blocked, skip the expensive 100-stock download.
+    # We only need candle data for the stocks we actually hold.
+    if allow_new_entries:
+        universe_data = fetch_batch_universe(STOCKS)
+        if not universe_data:
+            finish_log('ERROR', error_msg="Batch fetch failed")
+            return
+    else:
+        # Lightweight fetch: only held positions need exit checks
+        if held_stocks:
+            print(f"  📥 Entries blocked — fetching exit data for {len(held_stocks)} held stock(s) only...")
+            universe_data = fetch_batch_universe(list(held_stocks))
+        else:
+            print(f"  ℹ No open positions and new entries blocked. Nothing to do.")
+            finish_log('MARKET_CLOSED')
+            return
+
+    # ─── V4 Layer 3: Opportunity Ranking (only when entries allowed) ──────────
+    symbols_to_evaluate: list
+    if allow_new_entries:
+        try:
+            ranked_candidates = rank_universe(
+                universe_data=universe_data,
+                top_n=5,
+                allowed_sectors=allowed_sectors,
+            )
+            ranked_symbols = {r.symbol for r in ranked_candidates}
+            symbols_to_evaluate = list(ranked_symbols | held_stocks)
+            print(f"  🎯 V4: Evaluating {len(ranked_candidates)} ranked candidates + {len(held_stocks)} open positions")
+        except Exception as e:
+            print(f"  ⚠ Ranker failed (fail-open, using full universe): {e}")
+            symbols_to_evaluate = STOCKS
+    else:
+        # Exit-only mode: evaluate held positions only
+        symbols_to_evaluate = list(held_stocks)
 
     # ─── 1. Analyze Universe ──────────────────────────
     for symbol in symbols_to_evaluate:
@@ -315,9 +381,20 @@ def run():
 
             # Execution
             if sig.final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS:
-                # V3.6: Daily loss guard — halt all new BUYs if -2R hit today
-                if daily_loss_limit_hit:
-                    print(f"  ⛔ {short_name}: Daily loss guard active — BUY skipped")
+                # V4.3: New entries gate — blocked when market closed, macro filtered, or circuit breakers
+                if not allow_new_entries:
+                    active_guards = []
+                    if not market_open:
+                        active_guards.append("market-closed")
+                    elif macro_blocked:
+                        active_guards.append("macro")
+                    if daily_loss_limit_hit:
+                        active_guards.append("daily")
+                    if weekly_loss_limit_hit:
+                        active_guards.append("weekly")
+                    if performance_guard_hit:
+                        active_guards.append("performance")
+                    print(f"  ⛔ {short_name}: {'/'.join(active_guards) or 'guard'} active — BUY skipped")
                     continue
 
                 # V3.5 Guard 1: RANGING regime double-check at execution time
@@ -335,8 +412,13 @@ def run():
                 except Exception:
                     pass  # fail-open: allow trade if DB check fails
 
-                # V3.5 Guard 2: 24h cooldown after losing exit on same symbol
-                # Data: AXISBANK re-entered 1.5h after loss, lost ₹651 more
+                # Guard 2: cooldown after losing exits on the same symbol.
+                # One recent loss = 24h pause; two losses in five days = five-day pause.
+                recent_losses = 0
+                try:
+                    recent_losses = db.count_recent_losses(symbol, days=5)
+                except Exception:
+                    recent_losses = 0
                 last_loss_at = db.get_last_loss_time(symbol)
                 if last_loss_at:
                     try:
@@ -346,8 +428,9 @@ def run():
                         cooldown_hours = (now_utc - loss_utc).total_seconds() / 3600
                     except Exception:
                         cooldown_hours = 999  # fail-open: allow trade if time math breaks
-                    if cooldown_hours < 24:
-                        print(f"  ⏳ {short_name}: 24h cooldown active ({cooldown_hours:.1f}h since last loss)")
+                    cooldown_limit = 120 if recent_losses >= 2 else 24
+                    if cooldown_hours < cooldown_limit:
+                        print(f"  ⏳ {short_name}: {cooldown_limit}h loss cooldown active ({cooldown_hours:.1f}h since last loss)")
                         continue
 
                 plan = sig.plan
@@ -409,64 +492,73 @@ def run():
                 continue
             curr = df.iloc[-1]
             price = float(curr["close"])
+            bar_open = float(curr["open"])
+            bar_high = float(curr["high"])
+            bar_low = float(curr["low"])
             
             # --- 1. FULL STOP LOSS CHECK ---
-            if price <= sl:
-                c = calculate_realistic_charges(entry, price, qty, False)
-                print(f"  🛑 STOP LOSS hit for {stock} at ₹{price:.2f}")
-                send_telegram_alert(f"🛑 STOP LOSS hit for {stock} at ₹{price:.2f} | Final PnL: ₹{c.net_pnl:+.2f}")
-                db.execute_sell(stock, qty, entry, price, c.net_pnl, c.total)
-                cash += (price * qty - c.total)
+            if bar_low <= sl:
+                fill_price = bar_open * 0.999 if bar_open < sl else sl
+                c = calculate_realistic_charges(entry, fill_price, qty, False)
+                print(f"  🛑 STOP LOSS hit for {stock} at ₹{fill_price:.2f}")
+                send_telegram_alert(f"🛑 STOP LOSS hit for {stock} at ₹{fill_price:.2f} | Final PnL: ₹{c.net_pnl:+.2f}")
+                db.execute_sell(stock, qty, entry, fill_price, c.net_pnl, c.total)
+                cash += (fill_price * qty - c.total)
                 open_count -= 1
                 held_stocks.discard(stock)
                 continue
 
             # --- 2. TRANCHE TARGET CHECKS ---
             # Tranche 1: 40% exit at 1:1 R/R
-            if tx < 1 and price >= t1:
+            if tx < 1 and bar_high >= t1:
                 t1_qty = int(orig_qty * 0.4)
                 if t1_qty > 0:
-                    c = calculate_realistic_charges(entry, price, t1_qty, False)
-                    print(f"  🎯 TRANCHE 1 hit for {stock} at ₹{price:.2f} (Moved SL to Break-Even)")
-                    send_telegram_alert(f"🎯 TRANCHE 1 hit for {stock} at ₹{price:.2f} | PnL: ₹{c.net_pnl:+.2f}\n🛡 SL moved to Break-Even (₹{entry:.2f})")
-                    db.execute_partial_sell(stock, t1_qty, entry, price, c.net_pnl, c.total, 1)
+                    fill_price = bar_open * 0.999 if bar_open > t1 else t1
+                    c = calculate_realistic_charges(entry, fill_price, t1_qty, False)
+                    print(f"  🎯 TRANCHE 1 hit for {stock} at ₹{fill_price:.2f} (Moved SL to Break-Even)")
+                    send_telegram_alert(f"🎯 TRANCHE 1 hit for {stock} at ₹{fill_price:.2f} | PnL: ₹{c.net_pnl:+.2f}\n🛡 SL moved to Break-Even (₹{entry:.2f})")
+                    db.execute_partial_sell(stock, t1_qty, entry, fill_price, c.net_pnl, c.total, 1)
                     db.update_trailing_stop(stock, entry) # Elevate SL to Entry
-                    cash += (price * t1_qty - c.total)
+                    cash += (fill_price * t1_qty - c.total)
                     # Refresh local state for next tranches in same loop if needed
                     qty -= t1_qty
                     tx = 1
                     sl = entry 
 
             # Tranche 2: 40% exit at 1:2 R/R
-            if tx < 2 and price >= t2:
+            if tx < 2 and bar_high >= t2:
                 t2_qty = int(orig_qty * 0.4)
                 if t2_qty > 0 and qty >= t2_qty:
-                    c = calculate_realistic_charges(entry, price, t2_qty, False)
-                    print(f"  🎯 TRANCHE 2 hit for {stock} at ₹{price:.2f} (Moved SL to T1)")
-                    send_telegram_alert(f"🎯 TRANCHE 2 hit for {stock} at ₹{price:.2f} | PnL: ₹{c.net_pnl:+.2f}\n🛡 SL moved to T1 (₹{t1:.2f})")
-                    db.execute_partial_sell(stock, t2_qty, entry, price, c.net_pnl, c.total, 2)
+                    fill_price = bar_open * 0.999 if bar_open > t2 else t2
+                    c = calculate_realistic_charges(entry, fill_price, t2_qty, False)
+                    print(f"  🎯 TRANCHE 2 hit for {stock} at ₹{fill_price:.2f} (Moved SL to T1)")
+                    send_telegram_alert(f"🎯 TRANCHE 2 hit for {stock} at ₹{fill_price:.2f} | PnL: ₹{c.net_pnl:+.2f}\n🛡 SL moved to T1 (₹{t1:.2f})")
+                    db.execute_partial_sell(stock, t2_qty, entry, fill_price, c.net_pnl, c.total, 2)
                     db.update_trailing_stop(stock, t1) # Elevate SL to T1
-                    cash += (price * t2_qty - c.total)
+                    cash += (fill_price * t2_qty - c.total)
                     qty -= t2_qty
                     tx = 2
                     sl = t1
 
             # Tranche 3: Runner (20%) exit at Target 3 or Trailing Stop
             if tx >= 2:
-                if price >= t3:
+                if bar_high >= t3:
                     # Final target hit
-                    c = calculate_realistic_charges(entry, price, qty, False)
-                    print(f"  🏁 RUNNER Target hit for {stock} at ₹{price:.2f}")
-                    send_telegram_alert(f"🏁 RUNNER Target hit for {stock} at ₹{price:.2f} | Final PnL: ₹{c.net_pnl:+.2f}")
-                    db.execute_sell(stock, qty, entry, price, c.net_pnl, c.total)
-                    cash += (price * qty - c.total)
+                    fill_price = bar_open * 0.999 if bar_open > t3 else t3
+                    c = calculate_realistic_charges(entry, fill_price, qty, False)
+                    print(f"  🏁 RUNNER Target hit for {stock} at ₹{fill_price:.2f}")
+                    send_telegram_alert(f"🏁 RUNNER Target hit for {stock} at ₹{fill_price:.2f} | Final PnL: ₹{c.net_pnl:+.2f}")
+                    db.execute_sell(stock, qty, entry, fill_price, c.net_pnl, c.total)
+                    cash += (fill_price * qty - c.total)
                     open_count -= 1
                     held_stocks.discard(stock)
                     continue
                 else:
                     # Standard trailing stop for the runner
                     atr = calculate_atr(df) or (price * 0.01)
-                    regime_src = frames.get("1d") or df
+                    regime_src = frames.get("1d")
+                    if regime_src is None or regime_src.empty:
+                        regime_src = df
                     adx = detect_regime(regime_src).adx
                     upd = check_trailing_stop(stock, entry, price, sl, atr, adx)
                     if upd.should_update:

@@ -40,7 +40,7 @@ BREADTH_BASKET = [
     "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "TCS.NS",
     "AXISBANK.NS", "SBIN.NS", "BAJFINANCE.NS", "LT.NS", "HINDUNILVR.NS",
     "BHARTIARTL.NS", "KOTAKBANK.NS", "MARUTI.NS", "ASIANPAINT.NS", "TITAN.NS",
-    "SUNPHARMA.NS", "HCLTECH.NS", "WIPRO.NS", "ADANIPORTS.NS", "TATAMOTORS.NS",
+    "SUNPHARMA.NS", "HCLTECH.NS", "WIPRO.NS", "ADANIPORTS.NS", "ETERNAL.NS",
     "NTPC.NS", "POWERGRID.NS", "COALINDIA.NS", "ONGC.NS", "BPCL.NS",
     "DRREDDY.NS", "DIVISLAB.NS", "CIPLA.NS", "TECHM.NS", "BAJAJ-AUTO.NS",
     "HEROMOTOCO.NS", "TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "VEDL.NS",
@@ -83,7 +83,7 @@ def _fetch_nifty_state() -> dict:
             return result
         # Handle both Index and MultiIndex column structures
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[1].lower() if len(c) > 1 else c[0].lower() for r in [df.columns] for c in r]
+            df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
         else:
             df.columns = [c.lower() for c in df.columns]
 
@@ -109,7 +109,7 @@ def _fetch_nifty_state() -> dict:
                               progress=False, auto_adjust=True)
         if vix_df is not None and len(vix_df) > 0:
             if isinstance(vix_df.columns, pd.MultiIndex):
-                vix_df.columns = [c[1].lower() if len(c) > 1 else c[0].lower() for r in [vix_df.columns] for c in r]
+                vix_df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in vix_df.columns]
             else:
                 vix_df.columns = [c.lower() for c in vix_df.columns]
             vix_val = float(vix_df["close"].dropna().iloc[-1])
@@ -145,7 +145,7 @@ def _compute_breadth(breadth_basket: list) -> float:
                 
                 # Handle MultiIndex if necessary
                 if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [c[1].lower() if len(c) > 1 else c[0].lower() for r in [df.columns] for c in r]
+                    df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
                 else:
                     df.columns = [c.lower() for c in df.columns]
 

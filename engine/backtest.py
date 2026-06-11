@@ -510,11 +510,30 @@ def run_backtest(period: str = "2y") -> BacktestResult:
 def save_to_database(result: BacktestResult):
     """Persist the current DAILY_PROXY segment to backtest_results table."""
     import psycopg2
+    import math
     DATABASE_URL = os.environ["DATABASE_URL"]
     seg = result.proxy
     if seg is None or seg.total_trades == 0:
         print("  No DAILY_PROXY trades to save.")
         return
+
+    # Sanitize inputs that might be inf or nan
+    def clean_val(v, default=0.0):
+        try:
+            val = float(v)
+            if math.isinf(val) or math.isnan(val):
+                return default
+            return val
+        except (TypeError, ValueError):
+            return default
+
+    pf = clean_val(seg.profit_factor, 99.99)
+    sharpe = clean_val(seg.sharpe_ratio, 0.0)
+    sortino = clean_val(seg.sortino_ratio, 0.0)
+    max_dd = clean_val(seg.max_drawdown_pct, 0.0)
+    expectancy = clean_val(seg.expectancy, 0.0)
+    net_pnl = clean_val(seg.net_pnl, 0.0)
+    win_rate = clean_val(seg.win_rate, 0.0)
 
     conn = psycopg2.connect(DATABASE_URL)
     cur  = conn.cursor()
@@ -526,13 +545,14 @@ def save_to_database(result: BacktestResult):
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         "V3_DAILY_PROXY", seg.period_start, seg.period_end,
-        seg.total_trades, seg.win_rate, seg.profit_factor,
-        seg.sharpe_ratio, seg.sortino_ratio, seg.max_drawdown_pct,
-        seg.expectancy, seg.net_pnl,
+        seg.total_trades, win_rate, pf,
+        sharpe, sortino, max_dd,
+        expectancy, net_pnl,
     ))
     conn.commit()
     cur.close(); conn.close()
     print("  DAILY_PROXY results saved to database.\n")
+
 
 
 if __name__ == "__main__":

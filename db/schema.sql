@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_price NUMERIC(12,2),
     exit_price NUMERIC(12,2),
     quantity INTEGER,
+    original_quantity INTEGER,
     pnl NUMERIC(12,2),
     reason TEXT,
     entry_time TIMESTAMPTZ,
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS trades (
     atr_at_entry NUMERIC(12,4),
     trailing_sl NUMERIC(12,2),
     sentiment_score NUMERIC(4,2),
-    charges NUMERIC(12,4) DEFAULT 0
+    charges NUMERIC(12,4) DEFAULT 0,
+    exit_type VARCHAR(30)
 );
 
 CREATE TABLE IF NOT EXISTS open_positions (
@@ -40,6 +42,11 @@ CREATE TABLE IF NOT EXISTS open_positions (
     entry_price NUMERIC(12,2),
     stop_loss NUMERIC(12,2),
     target NUMERIC(12,2),
+    original_quantity INTEGER,
+    target_1 NUMERIC(12,2),
+    target_2 NUMERIC(12,2),
+    target_3 NUMERIC(12,2),
+    tranches_exited INTEGER NOT NULL DEFAULT 0,
     entry_time TIMESTAMPTZ,
     reason TEXT
 );

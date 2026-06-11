@@ -12,6 +12,15 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS atr_at_entry NUMERIC(12,4);
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS trailing_sl NUMERIC(12,2);
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS sentiment_score NUMERIC(4,2);
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS charges NUMERIC(12,4) DEFAULT 0;  -- [P0 FIX] was missing, written on every close
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS original_quantity INTEGER;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_type VARCHAR(30);
+
+-- Add V4 tranche columns to open positions
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS original_quantity INTEGER;
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS target_1 NUMERIC(12,2);
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS target_2 NUMERIC(12,2);
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS target_3 NUMERIC(12,2);
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS tranches_exited INTEGER NOT NULL DEFAULT 0;
 
 -- Allow 'SIGNAL' status
 ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_status_check;
@@ -64,12 +73,12 @@ if __name__ == "__main__":
         if stmt:
             try:
                 cur.execute(stmt)
-                print(f"✓ {stmt[:60]}...")
+                print(f"[OK] {stmt[:60]}...")
             except Exception as e:
-                print(f"⚠ {stmt[:60]}... → {e}")
+                print(f"[WARN] {stmt[:60]}... -> {e}")
                 conn.rollback()
                 continue
     conn.commit()
     cur.close()
     conn.close()
-    print("\n✅ V2 migration complete!")
+    print("\n[SUCCESS] V2 migration complete!")

@@ -1,3 +1,5 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = {}
+const nextConfig = {
+  outputFileTracing: false,
+}
 export default nextConfig

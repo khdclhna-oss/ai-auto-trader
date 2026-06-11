@@ -24,16 +24,18 @@ from regime import detect_regime
 from risk_manager import plan_position
 
 # ─── Constants (single source of truth, synced with trader.py) ────────────────
-BUY_THRESHOLD  = 6    # V4.0: raised from 5. Score-4/5 trades were primarily noise.
-SELL_THRESHOLD = -2   # score at which a held position gets a confluence sell
-PRICE_SANITY_PCT = 20  # reject bars with >20% change (split/stale data guard)
-GAP_SLIPPAGE   = 0.001  # 0.1% extra fill haircut for gap-through exits
-MIN_TARGET_PCT = 2.0   # V3.5: minimum target move % to justify charges (~0.40% breakeven)
+BUY_THRESHOLD        = 6    # Default threshold (TRENDING/RANGING regimes)
+VOLATILE_BUY_THRESHOLD = 5  # V4.1: VOLATILE regime uses lower threshold — 55% WR at score-5+
+SELL_THRESHOLD       = -2   # score at which a held position gets a confluence sell
+PRICE_SANITY_PCT     = 20   # reject bars with >20% change (split/stale data guard)
+GAP_SLIPPAGE         = 0.001  # 0.1% extra fill haircut for gap-through exits
+MIN_TARGET_PCT       = 3.5  # V4.2: Raised from 2.0% to offset ₹113/trade average charges
+ATR_VOL_FLOOR        = 0.005  # V4.2: 0.5% ATR floor (reject "dead" stocks)
+MIN_VOL_RATIO        = 0.5   # V4.1: Lowered from 1.2x — data shows low-vol entries win more (42% WR vs 14%)
 
-# V3.6: Sentiment disabled until live LLM produces non-zero scores.
-# All 31 closed trades had sentiment_score = 0. Re-enable once you have
-# verified that get_llm_sentiment() returns non-zero values in production.
-SENTIMENT_ACTIVE = False
+# V4.1: Sentiment re-enabled. Gemini LLM adds +1/-1 edge on borderline setups.
+# Previously disabled because all 31 trades returned 0.0 — now activating for live coverage.
+SENTIMENT_ACTIVE = True
 
 
 def _default_sentiment(symbol: str) -> float:
@@ -107,6 +109,21 @@ def evaluate_signal(
     # ── Step 1: Regime ────────────────────────────────────────────────────────
     regime_src = df_daily if (df_daily is not None and len(df_daily) > 50) else df_15
     regime_result = detect_regime(regime_src)
+    if regime_result.regime == "RANGING":
+        return SignalResult(
+            symbol,
+            "HOLD",
+            0,
+            0,
+            0,
+            0.0,
+            "RANGING regime hard block",
+            0.0,
+            0.0,
+            regime_result.regime,
+            None,
+            skipped=True,
+        )
 
     # ── Step 2: Multi-timeframe confluence ────────────────────────────────────
     confluence = get_confluence(symbol, frames, regime_result.regime)
@@ -146,12 +163,24 @@ def evaluate_signal(
     except Exception:
         atr = price * 0.01
 
+    # V4.2: ATR Volatility Floor
+    volatility_pct = (atr / price) * 100 if price > 0 else 0
+    if volatility_pct < (ATR_VOL_FLOOR * 100):
+        reason_str = f"VOLATILITY TOO LOW ({volatility_pct:.2f}% < {ATR_VOL_FLOOR*100:.2f}%) — signal killed"
+        return SignalResult(symbol, "HOLD", effective_score, confluence.confluence_score,
+                            sentiment, sentiment_score, reason_str, price, atr,
+                            regime_result.regime, None, skipped=True)
+
     # ── Step 6: Sentiment-gated final action ──────────────────────────────────
+    # V4.1: VOLATILE regime uses a lower BUY threshold (5 vs 6)
+    # Data: VOLATILE regime has 55% WR vs 23% RANGING, 29% TRENDING
+    effective_buy_threshold = VOLATILE_BUY_THRESHOLD if regime_result.regime == "VOLATILE" else BUY_THRESHOLD
+
     # [P0 FIX] final_action is derived from effective_score, but MUST respect hard HOLD constraints 
     # (like the RANGING regime filter) from the confluence engine.
     if confluence.action == "HOLD":
         final_action = "HOLD"
-    elif effective_score >= BUY_THRESHOLD:
+    elif effective_score >= effective_buy_threshold:
         final_action = "BUY"
     elif effective_score <= SELL_THRESHOLD:
         final_action = "SELL"
@@ -162,7 +191,19 @@ def evaluate_signal(
     reason_parts = confluence.reasons.copy()
     if sentiment > 0:  reason_parts.append(f"Positive news +1 ({sentiment_score:+.2f})")
     elif sentiment < 0: reason_parts.append(f"Negative news -1 ({sentiment_score:+.2f})")
-    reason_str = " | ".join(reason_parts) + f" → score {effective_score:+d} → {final_action}"
+    reason_str = " | ".join(reason_parts) + f" -> score {effective_score:+d} -> {final_action}"
+
+    # V4.1 Volume Filter (Softened)
+    # Data analysis: Low-vol entries (<0.2x avg) have 42% WR vs 14% for high-vol
+    # Previous 1.2x threshold was blocking profitable low-vol consolidation entries
+    # New filter: only blocks extreme volatility spikes (chasing momentum = bad)
+    vol_ratio = 1.0
+    if confluence.quarter and hasattr(confluence.quarter, 'indicators') and confluence.quarter.indicators:
+        vol_ratio = confluence.quarter.indicators.get('vol_ratio', 1.0)
+    if final_action == "BUY" and vol_ratio < MIN_VOL_RATIO:
+        reason_str += f" | VOLUME INSUFFICIENT ({vol_ratio:.2f}x < {MIN_VOL_RATIO:.1f}x) — SKIPPED"
+        final_action = "HOLD"
+
 
     # ── Step 7: Position plan (only if BUY warranted) ─────────────────────────
     plan = None
@@ -183,6 +224,11 @@ def evaluate_signal(
                 reason_str += f" | PRIMARY TARGET TOO SMALL ({target_move_pct:.1f}% < {MIN_TARGET_PCT}%) — SKIPPED"
                 final_action = "HOLD"
                 plan = None
+            else:
+                reason_str += f" | cost/risk {plan.cost_to_risk:.0%} | reward/cost {plan.reward_to_cost:.1f}x"
+        else:
+            reason_str += " | COST/RISK OR SIZE GATE FAILED -> HOLD"
+            final_action = "HOLD"
 
     return SignalResult(
         symbol=symbol,

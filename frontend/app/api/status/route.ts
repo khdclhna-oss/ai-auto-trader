@@ -17,6 +17,20 @@ export async function GET() {
 
     const latest = runs.rows[0] || null
 
+    // Fetch latest macro state
+    let macro = null
+    try {
+      const macroQuery = await client.query(`
+        SELECT tradeable, nifty_above_200ema, nifty_50ema_slope_up, vix, vix_ok, breadth_pct, breadth_ok, reason, updated_at
+        FROM macro_state
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `)
+      macro = macroQuery.rows[0] || null
+    } catch (e) {
+      console.warn("macro_state table might not exist yet: ", e)
+    }
+
     // Calculate "next run" — cron fires every 15 min during market hours
     const now = new Date()
     const istOffset = 5.5 * 60 * 60 * 1000
@@ -42,6 +56,7 @@ export async function GET() {
     return NextResponse.json({
       latest,
       runs: runs.rows,
+      macro,
       isMarketOpen,
       lastRunAgeMinutes: lastRunAge,
       consecutiveErrors: consecutiveErrors === -1 ? recentStatuses.length : consecutiveErrors,

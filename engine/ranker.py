@@ -41,9 +41,9 @@ CACHE_TTL_SECONDS = 1800  # Nifty benchmark cached for 30 min
 
 # Composite score weights
 WEIGHTS = {
-    "relative_strength": 0.25,
-    "volume_trend":      0.20,
-    "proximity_breakout":0.20,
+    "relative_strength": 0.10,  # V4.2: Reduced from 0.25
+    "volume_trend":      0.40,  # V4.2: Increased from 0.20 (Money flow is king)
+    "proximity_breakout":0.15,  # V4.2: Reduced from 0.20
     "trend_quality":     0.15,
     "reward_to_cost":    0.10,
     "regime_alignment":  0.10,

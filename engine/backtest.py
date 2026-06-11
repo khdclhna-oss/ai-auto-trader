@@ -63,6 +63,8 @@ STOCKS = [
 ]
 INITIAL_CAPITAL = 100_000
 from risk_manager import MAX_POSITIONS, TRAIL_DISTANCE, TRAIL_ACTIVATION
+GAP_SLIPPAGE = 0.001  # 0.1% extra fill haircut for gap-through exits
+
 
 # ── Data structures ──────────────────────────────────────────────────────────
 @dataclass
@@ -290,37 +292,110 @@ def run_backtest(period: str = "2y") -> BacktestResult:
             row = df_daily.loc[date]
             atr_val = float(row["atr"]) if "atr" in row.index and row["atr"] > 0 else float(row["close"]) * 0.01
 
-            # ── Manage open positions with OHLC intrabar model ────────────────
+            # ── Manage open positions with OHLC tranche model ─────────────────
             if symbol in held_positions:
                 pos = held_positions[symbol]
-                exit_info = apply_intrabar_exit(row, pos["entry"], pos["sl"], pos["target"],
-                                                pos["qty"], pos["entry_time"], date)
-
-                if exit_info is not None:
-                    fp = exit_info["fill_price"]
-                    c  = calculate_realistic_charges(pos["entry"], fp, pos["qty"], is_intraday=False)
+                bar_open = float(row["open"])
+                bar_high = float(row["high"])
+                bar_low = float(row["low"])
+                bar_close = float(row["close"])
+                
+                entry = pos["entry"]
+                sl = pos["sl"]
+                t1 = pos["t1"]
+                t2 = pos["t2"]
+                t3 = pos["t3"]
+                orig_qty = pos["orig_qty"]
+                qty = pos["qty"]
+                tx = pos["tranches_exited"]
+                
+                # 1. Full stop loss check (hits remaining quantity)
+                if bar_low <= sl:
+                    fill_price = bar_open * (1 - GAP_SLIPPAGE) if bar_open < sl else sl
+                    c = calculate_realistic_charges(entry, fill_price, qty, is_intraday=False)
                     pnl = c.net_pnl
+                    total_pnl = pos["realized_pnl"] + pnl
+                    total_charges = pos["charges"] + c.total
+                    pos["exits_log"].append(f"SL at ₹{fill_price:.2f} (qty {qty})")
+                    weighted_exit_price = (total_pnl + entry * orig_qty + total_charges) / orig_qty if orig_qty > 0 else fill_price
                     all_trades.append(BacktestTrade(
                         stock=symbol, action="SELL",
-                        entry_price=pos["entry"], exit_price=fp,
-                        quantity=pos["qty"], pnl=pnl, charges=c.total,
+                        entry_price=entry, exit_price=weighted_exit_price,
+                        quantity=orig_qty, pnl=total_pnl, charges=total_charges,
                         entry_time=pos["entry_time"], exit_time=date,
-                        note=f"{exit_info['type']} | {exit_info['note']} | charges ₹{c.total:.2f}",
+                        note=" | ".join(pos["exits_log"]),
                         hold_bars=i - pos["entry_idx"],
                         fidelity=pos["fidelity"],
                     ))
-                    cash += fp * pos["qty"] - c.total
+                    cash += fill_price * qty - c.total
                     del held_positions[symbol]
                     continue
-
-                # Trailing stop using synced risk_manager constants
-                # (V3.2: removed hardcoded 1.5% breakeven trigger — live engine uses
-                #  check_trailing_stop which handles breakeven via TRAIL_ACTIVATION)
-                price_now = float(row["close"])
-                unrealized = price_now - pos["entry"]
-                if unrealized > TRAIL_ACTIVATION * atr_val:
-                    new_sl = max(pos["sl"], price_now - TRAIL_DISTANCE * atr_val)
-                    pos["sl"] = new_sl
+                
+                # 2. Target checks
+                # Tranche 1: 40% exit at 1:1 R/R
+                if tx < 1 and bar_high >= t1:
+                    t1_qty = int(orig_qty * 0.4)
+                    if t1_qty > 0 and qty >= t1_qty:
+                        fill_price = bar_open * (1 - GAP_SLIPPAGE) if bar_open > t1 else t1
+                        c = calculate_realistic_charges(entry, fill_price, t1_qty, is_intraday=False)
+                        pnl = c.net_pnl
+                        pos["realized_pnl"] += pnl
+                        pos["charges"] += c.total
+                        pos["exits_log"].append(f"T1 hit at ₹{fill_price:.2f} (qty {t1_qty})")
+                        cash += fill_price * t1_qty - c.total
+                        qty -= t1_qty
+                        tx = 1
+                        sl = entry  # Move stop to breakeven
+                
+                # Tranche 2: 40% exit at 1:2 R/R
+                if tx < 2 and bar_high >= t2:
+                    t2_qty = int(orig_qty * 0.4)
+                    if t2_qty > 0 and qty >= t2_qty:
+                        fill_price = bar_open * (1 - GAP_SLIPPAGE) if bar_open > t2 else t2
+                        c = calculate_realistic_charges(entry, fill_price, t2_qty, is_intraday=False)
+                        pnl = c.net_pnl
+                        pos["realized_pnl"] += pnl
+                        pos["charges"] += c.total
+                        pos["exits_log"].append(f"T2 hit at ₹{fill_price:.2f} (qty {t2_qty})")
+                        cash += fill_price * t2_qty - c.total
+                        qty -= t2_qty
+                        tx = 2
+                        sl = t1  # Move stop to Target 1
+                
+                # Tranche 3: Runner (20%) exit at Target 3 or Trailing Stop
+                if tx >= 2:
+                    if bar_high >= t3:
+                        fill_price = bar_open * (1 - GAP_SLIPPAGE) if bar_open > t3 else t3
+                        c = calculate_realistic_charges(entry, fill_price, qty, is_intraday=False)
+                        pnl = c.net_pnl
+                        total_pnl = pos["realized_pnl"] + pnl
+                        total_charges = pos["charges"] + c.total
+                        pos["exits_log"].append(f"T3 hit at ₹{fill_price:.2f} (qty {qty})")
+                        weighted_exit_price = (total_pnl + entry * orig_qty + total_charges) / orig_qty if orig_qty > 0 else fill_price
+                        all_trades.append(BacktestTrade(
+                            stock=symbol, action="SELL",
+                            entry_price=entry, exit_price=weighted_exit_price,
+                            quantity=orig_qty, pnl=total_pnl, charges=total_charges,
+                            entry_time=pos["entry_time"], exit_time=date,
+                            note=" | ".join(pos["exits_log"]),
+                            hold_bars=i - pos["entry_idx"],
+                            fidelity=pos["fidelity"],
+                        ))
+                        cash += fill_price * qty - c.total
+                        del held_positions[symbol]
+                        continue
+                    else:
+                        # Trail stop logic for runner
+                        unrealized_pnl_atr = (bar_close - entry) / atr_val if atr_val > 0 else 0
+                        if unrealized_pnl_atr >= TRAIL_ACTIVATION:
+                            candidate_stop = round(bar_close - TRAIL_DISTANCE * atr_val, 2)
+                            candidate_stop = max(candidate_stop, entry)
+                            sl = max(candidate_stop, sl)
+                
+                # Save state back to position dict
+                pos["qty"] = qty
+                pos["sl"] = sl
+                pos["tranches_exited"] = tx
 
             # ── Build frames dict based on fidelity ───────────────────────────
             # Currently acting as a DAILY_PROXY for the intraday engine
@@ -348,29 +423,28 @@ def run_backtest(period: str = "2y") -> BacktestResult:
                 plan = result.plan
                 if plan and plan.quantity > 0 and plan.quantity * result.price <= cash:
                     held_positions[symbol] = {
-                        "qty": plan.quantity, "entry": result.price,
-                        "sl": plan.stop_loss, "target": plan.target_2,
-                        "entry_time": date, "entry_idx": i, "fidelity": fidelity,
+                        "qty": plan.quantity,
+                        "orig_qty": plan.quantity,
+                        "entry": result.price,
+                        "sl": plan.stop_loss,
+                        "t1": plan.target_1,
+                        "t2": plan.target_2,
+                        "t3": plan.target_3,
+                        "tranches_exited": 0,
+                        "entry_time": date,
+                        "entry_idx": i,
+                        "fidelity": fidelity,
                         "confluence": result.confluence_score,
                         "sentiment": result.sentiment_score,
+                        "realized_pnl": 0.0,
+                        "charges": 0.0,
+                        "exits_log": []
                     }
                     cash -= result.price * plan.quantity
 
-            elif result.final_action == "SELL" and symbol in held_positions:
-                pos = held_positions[symbol]
-                fp  = float(row["close"])
-                c   = calculate_realistic_charges(pos["entry"], fp, pos["qty"], is_intraday=False)
-                pnl = c.net_pnl
-                all_trades.append(BacktestTrade(
-                    stock=symbol, action="SELL",
-                    entry_price=pos["entry"], exit_price=fp,
-                    quantity=pos["qty"], pnl=pnl, charges=c.total,
-                    entry_time=pos["entry_time"], exit_time=date,
-                    note=f"Signal sell | charges ₹{c.total:.2f}",
-                    hold_bars=i - pos["entry_idx"], fidelity=pos["fidelity"],
-                ))
-                cash += fp * pos["qty"] - c.total
-                del held_positions[symbol]
+            elif False:  # result.final_action == "SELL" and symbol in held_positions:
+                # Confluence SELL exits are disabled. Positions will only close via the Target/Stop Loss model.
+                pass
 
         # ── Daily equity snapshot ─────────────────────────────────────────────
         invested_val = sum(
@@ -393,12 +467,15 @@ def run_backtest(period: str = "2y") -> BacktestResult:
             fp = float(daily_data[symbol].loc[last_date]["close"])
             c  = calculate_realistic_charges(pos["entry"], fp, pos["qty"], is_intraday=False)
             pnl = c.net_pnl
+            total_pnl = pos["realized_pnl"] + pnl
+            total_charges = pos["charges"] + c.total
+            weighted_exit_price = (total_pnl + pos["entry"] * pos["orig_qty"] + total_charges) / pos["orig_qty"] if pos["orig_qty"] > 0 else fp
             all_trades.append(BacktestTrade(
                 stock=symbol, action="SELL",
-                entry_price=pos["entry"], exit_price=fp,
-                quantity=pos["qty"], pnl=pnl, charges=c.total,
+                entry_price=pos["entry"], exit_price=weighted_exit_price,
+                quantity=pos["orig_qty"], pnl=total_pnl, charges=total_charges,
                 entry_time=pos["entry_time"], exit_time=last_date,
-                note=f"End-of-backtest close | charges ₹{c.total:.2f}",
+                note=f"End-of-backtest close at ₹{fp:.2f} (qty {pos['qty']}) | " + " | ".join(pos["exits_log"]),
                 hold_bars=len(sorted_dates) - pos["entry_idx"], fidelity=pos["fidelity"],
             ))
 

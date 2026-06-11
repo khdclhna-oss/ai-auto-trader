@@ -60,6 +60,21 @@ STOCKS = [
 # DATABASE_URL is read lazily inside db.py to avoid crashing at import time.
 INITIAL_CAPITAL = 100000
 
+# V4.1: Blacklisted chronic-loss stocks
+# Data analysis: These 3 stocks generated -₹2,561 total losses (33% of all losses)
+# AXISBANK: 2 trades, 0% WR, -₹996 | ONGC: 3 trades, 0% WR, -₹684 | POWERGRID: 4 trades, 25% WR, -₹881
+# Common profile: PSU utilities / range-bound stocks that don't trend despite golden cross
+BLACKLISTED_STOCKS = frozenset({
+    "AXISBANK.NS",   # 0% WR, -₹996 — banking range-bound, low ATR momentum
+    "ONGC.NS",       # 0% WR, -₹684 — PSU oil, mean-reverts instead of trending
+    "POWERGRID.NS",  # 25% WR, -₹881 — utility stock, ADX < 30 nearly always
+})
+
+# V4.1: Minimum hold time before any exit checks (prevents intraday stop-hunting)
+# Data: <2hr trades have 0% WR. >24hr swing trades have 50% WR.
+MIN_HOLD_HOURS = 4.0  # Minimum hours to hold before evaluating exits
+
+
 
 class TeeLogger:
     def __init__(self):
@@ -234,20 +249,22 @@ def run():
     # ─── V4 Layer 1: Macro Filter (gates NEW entries only) ────────────────────
     macro_blocked = False
     allowed_sectors = None
-    if allow_new_entries:
-        try:
-            macro = get_macro_state(use_cache=True)
-            if not macro.tradeable:
-                macro_blocked = True
+    try:
+        macro = get_macro_state(use_cache=True)
+        db.save_macro_state(macro)
+        if not macro.tradeable:
+            macro_blocked = True
+            if allow_new_entries:
                 allow_new_entries = False
                 print(f"  🚫 MACRO FILTER BLOCKED: {macro.reason}")
                 print(f"  ℹ Exit management will still run for {open_count} open position(s).")
-            else:
+        else:
+            if allow_new_entries:
                 print(f"  ✅ Macro clear | Nifty200EMA={'✅' if macro.nifty_above_200ema else '❌'} "
                       f"| 50EMA slope={'✅' if macro.nifty_50ema_slope_up else '❌'} "
                       f"| VIX={macro.vix:.1f} | Breadth={macro.breadth_pct:.0f}%")
-        except Exception as e:
-            print(f"  ⚠ Macro filter failed (fail-open): {e}")
+    except Exception as e:
+        print(f"  ⚠ Macro filter failed (fail-open): {e}")
 
         # ─── V4 Layer 2: Sector Rotation ──────────────────────────────────────
         if not macro_blocked:
@@ -329,11 +346,19 @@ def run():
     else:
         # Lightweight fetch: only held positions need exit checks
         if held_stocks:
-            print(f"  📥 Entries blocked — fetching exit data for {len(held_stocks)} held stock(s) only...")
+            print(f"  ℹ Entries blocked — fetching exit data for {len(held_stocks)} held stock(s) only...")
             universe_data = fetch_batch_universe(list(held_stocks))
         else:
-            print(f"  ℹ No open positions and new entries blocked. Nothing to do.")
-            finish_log('MARKET_CLOSED')
+            # V4.1: Correctly label this as MACRO_BLOCKED, not MARKET_CLOSED
+            # The bot IS running during market hours, but macro conditions block new entries
+            # and there are no open positions to manage exits for.
+            block_reason = "no open positions"
+            if macro_blocked:
+                block_reason = "macro blocked"
+            elif not market_open:
+                block_reason = "market closed"
+            print(f"  ℹ {block_reason.title()} and no open positions. Standby mode.")
+            finish_log('MACRO_BLOCKED' if macro_blocked else 'MARKET_CLOSED')
             return
 
     # ─── V4 Layer 3: Opportunity Ranking (only when entries allowed) ──────────
@@ -397,6 +422,11 @@ def run():
                     print(f"  ⛔ {short_name}: {'/'.join(active_guards) or 'guard'} active — BUY skipped")
                     continue
 
+                # V4.1: Blacklisted chronic-loss stocks
+                if symbol in BLACKLISTED_STOCKS:
+                    print(f"  ⛔ {short_name}: Blacklisted (chronic losses) — BUY skipped")
+                    continue
+
                 # V3.5 Guard 1: RANGING regime double-check at execution time
                 # Data: 13 RANGING trades, 23.1% WR, -₹2,271 total
                 if sig.regime == "RANGING":
@@ -451,24 +481,9 @@ def run():
                         except Exception as e:
                             print(f"  ❌ BUY execution failed for {symbol}: {e}")
 
-            elif sig.final_action == "SELL":
-                open_pos = db.get_open_positions()
-                pos = next((p for p in open_pos if p["stock"] == symbol), None)
-                if pos:
-                    qty, ent = int(pos["quantity"]), float(pos["entry_price"])
-                    c = calculate_realistic_charges(ent, sig.price, qty, False)
-                    print(f"  🔴 SELL: {short_name} @ ₹{sig.price:.2f} | PnL: ₹{c.net_pnl:+.2f}")
-                    send_telegram_alert(f"🔴 SELL: {short_name} @ ₹{sig.price:.2f} | PnL: ₹{c.net_pnl:+.2f}")
-
-                    try:
-                        db.execute_sell(symbol, qty, ent, sig.price, c.net_pnl, c.total)
-                        proceeds = sig.price * qty - c.total
-                        open_count -= 1
-                        cash += proceeds
-                        held_stocks.discard(symbol)
-                        trades_total += 1
-                    except Exception as e:
-                        print(f"  ❌ SELL execution failed for {symbol}: {e}")
+            elif False:  # sig.final_action == "SELL": (Bypassed as per R1: Disable Confluence SELL Exits)
+                # Confluence SELL exits are disabled. Positions will only close via the Target/Stop Loss model.
+                pass
 
         except Exception as e:
             print(f"  ❌ Error {short_name}: {e}")
@@ -495,6 +510,22 @@ def run():
             bar_open = float(curr["open"])
             bar_high = float(curr["high"])
             bar_low = float(curr["low"])
+
+            # V4.1: Minimum hold time guard
+            # Data: <2hr intraday trades have 0% WR — normal noise stops them out before direction plays
+            # Only skip stop-loss check (let tranche targets still fire — they are profits)
+            entry_time_raw = pos.get("entry_time")
+            hold_hours = 999.0  # default: always allow exits if no entry_time
+            if entry_time_raw:
+                try:
+                    entry_ts = entry_time_raw if hasattr(entry_time_raw, 'tzinfo') else \
+                        datetime.fromisoformat(str(entry_time_raw).replace('Z', '+00:00'))
+                    if entry_ts.tzinfo is None:
+                        entry_ts = entry_ts.replace(tzinfo=timezone.utc)
+                    hold_hours = (datetime.now(timezone.utc) - entry_ts).total_seconds() / 3600
+                except Exception:
+                    hold_hours = 999.0
+            skip_sl = hold_hours < MIN_HOLD_HOURS
             
             # --- 1. FULL STOP LOSS CHECK ---
             if bar_low <= sl:

@@ -183,6 +183,72 @@ class Database:
             row = cur.fetchone()
             return float(row[0]) if row else 0.0
 
+    def get_week_realized_pnl(self) -> float:
+        """Returns net realized PnL for the current IST trading week."""
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(pnl), 0) FROM trades
+                WHERE status = 'CLOSED'
+                  AND exit_time >= (
+                      date_trunc('week', NOW() AT TIME ZONE 'Asia/Kolkata')
+                      AT TIME ZONE 'Asia/Kolkata'
+                  )
+            """)
+            row = cur.fetchone()
+            return float(row[0]) if row else 0.0
+
+    def count_recent_losses(self, stock: str, days: int = 5) -> int:
+        """Count losing exits for a symbol in the last N calendar days."""
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) FROM trades
+                WHERE stock = %s
+                  AND status = 'CLOSED'
+                  AND pnl < 0
+                  AND exit_time >= NOW() - (%s || ' days')::interval
+            """, (stock, days))
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+
+    def get_recent_system_stats(self, limit: int = 20, risk_amount: Optional[float] = None) -> Dict[str, Any]:
+        """Return compact performance stats for the most recent closed trades."""
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT pnl FROM (
+                    SELECT pnl, exit_time FROM trades
+                    WHERE status = 'CLOSED' AND pnl IS NOT NULL
+                    ORDER BY exit_time DESC
+                    LIMIT %s
+                ) recent
+                ORDER BY exit_time ASC
+            """, (limit,))
+            pnls = [float(r[0]) for r in cur.fetchall()]
+
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+        expectancy = sum(pnls) / len(pnls) if pnls else 0.0
+
+        max_loss_streak = 0
+        streak = 0
+        for pnl in pnls:
+            if pnl <= 0:
+                streak += 1
+                max_loss_streak = max(max_loss_streak, streak)
+            else:
+                streak = 0
+
+        expectancy_r = expectancy / risk_amount if risk_amount and risk_amount > 0 else 0.0
+        return {
+            "sample_size": len(pnls),
+            "profit_factor": profit_factor,
+            "expectancy": expectancy,
+            "expectancy_r": expectancy_r,
+            "max_loss_streak": max_loss_streak,
+        }
+
     def had_entry_today(self, stock: str) -> bool:
         """
         Returns True if there was any entry (OPEN or CLOSED) for this stock today (IST).
@@ -197,3 +263,30 @@ class Database:
             """, (stock,))
             return cur.fetchone() is not None
 
+    def save_macro_state(self, state):
+        """Save the latest macro state to the database."""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS macro_state (
+                        id SERIAL PRIMARY KEY,
+                        tradeable BOOLEAN,
+                        nifty_above_200ema BOOLEAN,
+                        nifty_50ema_slope_up BOOLEAN,
+                        vix NUMERIC(6,2),
+                        vix_ok BOOLEAN,
+                        breadth_pct NUMERIC(5,2),
+                        breadth_ok BOOLEAN,
+                        reason TEXT,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("DELETE FROM macro_state")
+                cur.execute("""
+                    INSERT INTO macro_state (tradeable, nifty_above_200ema, nifty_50ema_slope_up, vix, vix_ok, breadth_pct, breadth_ok, reason, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                """, (state.tradeable, state.nifty_above_200ema, state.nifty_50ema_slope_up, state.vix, state.vix_ok, state.breadth_pct, state.breadth_ok, state.reason))
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Failed to save macro state: {e}")

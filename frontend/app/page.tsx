@@ -27,6 +27,11 @@ type Analytics = {
   backtest: { sharpe_ratio: number; sortino_ratio: number; max_drawdown_pct: number; win_rate: number; profit_factor: number; total_pnl: number; total_trades: number; period_start: string; period_end: string } | null;
   signalDistribution: { action: string; count: number }[];
   regimeDistribution: { regime: string; count: number }[];
+  grossProfitFactor: number;
+  netProfitFactor: number;
+  totalCharges: number;
+  dpFeeLeakage: number;
+  payoffRatio: number;
 }
 type RunLog = {
   id: number; started_at: string; finished_at: string; status: string;
@@ -38,6 +43,17 @@ type SystemStatus = {
   latest: RunLog | null; runs: RunLog[];
   isMarketOpen: boolean; lastRunAgeMinutes: number | null;
   consecutiveErrors: number; hasRecentError: boolean; systemHealthy: boolean;
+  macro?: {
+    tradeable: boolean;
+    nifty_above_200ema: boolean;
+    nifty_50ema_slope_up: boolean;
+    vix: number;
+    vix_ok: boolean;
+    breadth_pct: number;
+    breadth_ok: boolean;
+    reason: string | null;
+    updated_at: string;
+  } | null;
 }
 
 const fetcher = (url: string) => fetch(url).then(res => res.json())
@@ -56,7 +72,7 @@ function Stat({ label, value, sub, color = 'cyan', up }: { label: string; value:
   
   return (
     <motion.div whileHover={{ scale: 1.02, y: -2 }} transition={{ type: 'spring', stiffness: 300 }}
-      className="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-xl shadow-2xl relative overflow-hidden group">
+      className="bg-slate-950/40 border border-slate-900/60 rounded-2xl p-5 backdrop-blur-md shadow-lg hover:shadow-[0_0_20px_-3px_rgba(6,182,212,0.15)] relative overflow-hidden group">
       {/* Subtle top glow */}
       <div className={`absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent ${variant.bg} to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500`} />
       <p className="text-xs text-slate-400 uppercase tracking-widest mb-1 font-medium">{label}</p>
@@ -84,6 +100,7 @@ function MetricCard({ label, value, icon: Icon, good, bad }: { label: string; va
 export default function Dashboard() {
   const [tab, setTab] = useState<'dashboard'|'live'|'log'|'analytics'|'status'>('dashboard')
   const [expandedLog, setExpandedLog] = useState<number | null>(null)
+  const [showHealthPopover, setShowHealthPopover] = useState(false)
 
   const { data: portfolio } = useSWR<Portfolio>('/api/portfolio', fetcher, { refreshInterval: 15000 })
   const { data: live } = useSWR<LiveTrade[]>('/api/trades/live', fetcher, { refreshInterval: 15000 })
@@ -156,15 +173,90 @@ export default function Dashboard() {
         {/* Header */}
         <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <div className="relative">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/25">
-                <Activity className="w-5 h-5 text-white" />
+            <div className="relative flex items-center gap-3">
+              <div className="relative">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/25">
+                  <Activity className="w-5 h-5 text-white" />
+                </div>
+                <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-400 rounded-full border-2 border-[#070d1a] animate-pulse" />
               </div>
-              <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-400 rounded-full border-2 border-[#070d1a] animate-pulse" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight">QuantumTrader <span className="text-xs text-cyan-400 font-normal ml-1 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/20">V2</span></h1>
-              <p className="text-xs text-slate-500">NSE Algorithmic Trading System · Multi-Timeframe Confluence</p>
+              <div>
+                <div className="flex items-center gap-3">
+                  <h1 className="text-xl font-bold tracking-tight">QuantumTrader <span className="text-xs text-cyan-400 font-normal ml-1 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/20">V3</span></h1>
+                  
+                  {/* System Health Popover */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowHealthPopover(!showHealthPopover)}
+                      className="flex items-center gap-1.5 bg-slate-900/60 border border-slate-800/80 px-2.5 py-1 rounded-xl hover:bg-slate-800/80 transition-colors text-[10px] text-slate-300 font-medium"
+                    >
+                      <span className={`w-2 h-2 rounded-full ${status?.systemHealthy ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+                      <span>Health</span>
+                      <ChevronDown className="w-3 h-3 text-slate-400" />
+                    </button>
+                    
+                    <AnimatePresence>
+                      {showHealthPopover && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                          className="absolute left-0 mt-2 w-72 bg-[#0c1424]/95 border border-white/10 rounded-2xl p-4 backdrop-blur-xl shadow-2xl z-50 space-y-3 text-left"
+                        >
+                          <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                            <span className="font-semibold text-white text-xs">System Diagnostics</span>
+                            <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase ${
+                              status?.systemHealthy ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'
+                            }`}>
+                              {status?.systemHealthy ? 'Healthy' : 'Degraded'}
+                            </span>
+                          </div>
+                          
+                          <div className="space-y-1.5 text-[11px]">
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Market Status:</span>
+                              <span className="text-white font-medium">{status?.isMarketOpen ? '🟢 OPEN' : '🔴 CLOSED'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Last Execution:</span>
+                              <span className="text-white font-medium">{status?.lastRunAgeMinutes !== null && status?.lastRunAgeMinutes !== undefined ? `${status.lastRunAgeMinutes}m ago` : 'N/A'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Scanned Universe:</span>
+                              <span className="text-white font-medium">{status?.latest?.stocks_scanned ?? 0} stocks</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Fired Signals:</span>
+                              <span className="text-white font-medium">{status?.latest?.signals_fired ?? 0}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Run Duration:</span>
+                              <span className="text-white font-medium">{status?.latest?.duration_ms !== undefined && status?.latest !== null ? `${(status.latest.duration_ms / 1000).toFixed(1)}s` : 'N/A'}</span>
+                            </div>
+                          </div>
+                          
+                          {status?.latest?.error_message && (
+                            <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-2 text-[10px] text-red-300 font-mono break-words max-h-24 overflow-y-auto">
+                              <strong>Error:</strong> {status.latest.error_message}
+                            </div>
+                          )}
+                          
+                          <div className="border-t border-white/5 pt-2 flex justify-between items-center text-[10px]">
+                            <span className="text-slate-500">Consecutive Errors: {status?.consecutiveErrors ?? 0}</span>
+                            <button 
+                              onClick={() => { setTab('status'); setShowHealthPopover(false); }}
+                              className="text-cyan-400 hover:text-cyan-300 font-medium"
+                            >
+                              Logs Tab →
+                            </button>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500">NSE Algorithmic Trading System · Multi-Timeframe Confluence</p>
+              </div>
             </div>
           </div>
           <div className="text-right">
@@ -206,6 +298,59 @@ export default function Dashboard() {
             )
           })}
         </div>
+
+        {/* Macro State Widget */}
+        {status?.macro ? (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-slate-950/40 border border-slate-900/60 rounded-2xl p-4 backdrop-blur-md shadow-lg grid grid-cols-2 md:grid-cols-5 gap-4 items-center relative overflow-hidden group hover:shadow-[0_0_20px_-3px_rgba(168,85,247,0.15)] transition-shadow duration-500"
+          >
+            <div className="absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-cyan-500/40 to-transparent opacity-50" />
+            
+            <div className="flex items-center gap-2.5 col-span-2 md:col-span-1 border-r border-white/5 pr-2">
+              <div className={`w-3.5 h-3.5 rounded-full ${status.macro.tradeable ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px_#10b981]' : 'bg-red-400'}`} />
+              <div>
+                <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Macro Verdict</p>
+                <p className="text-xs font-bold text-white whitespace-nowrap">
+                  {status.macro.tradeable ? '✅ TRADEABLE' : '⛔ BLOCKED'}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-0.5">Nifty Trend</p>
+              <p className={`text-xs font-semibold ${status.macro.nifty_above_200ema ? 'text-emerald-400' : 'text-red-400'}`}>
+                {status.macro.nifty_above_200ema ? '🟢 Nifty > 200 EMA' : '🔴 Nifty < 200 EMA'}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-0.5">50-EMA Slope</p>
+              <p className={`text-xs font-semibold ${status.macro.nifty_50ema_slope_up ? 'text-emerald-400' : 'text-red-400'}`}>
+                {status.macro.nifty_50ema_slope_up ? '📈 Slope UP' : '📉 Slope DOWN'}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-0.5">India VIX</p>
+              <p className={`text-xs font-semibold ${status.macro.vix_ok ? 'text-emerald-400' : 'text-orange-400'}`}>
+                {status.macro.vix_ok ? '🟢 ' : '⚠️ '}{status.macro.vix.toFixed(2)}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-0.5">Market Breadth</p>
+              <p className={`text-xs font-semibold ${status.macro.breadth_ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                {status.macro.breadth_ok ? '🟢 ' : '🔴 '}{status.macro.breadth_pct.toFixed(1)}%
+              </p>
+            </div>
+          </motion.div>
+        ) : (
+          <div className="bg-slate-950/40 border border-slate-900/60 rounded-2xl p-4 text-center text-slate-400 text-xs italic backdrop-blur-md">
+            Waiting for first live macro state update...
+          </div>
+        )}
 
         {/* Content */}
         <AnimatePresence mode="wait">
@@ -359,17 +504,18 @@ export default function Dashboard() {
                 {/* Live Performance */}
                 <div>
                   <h2 className="font-semibold text-slate-200 mb-3 flex items-center gap-2"><Zap className="w-4 h-4 text-cyan-400" /> Live Performance</h2>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                     <Stat label="Total Trades" value={String(analytics?.totalTrades ?? '—')} />
                     <Stat label="Win Rate" value={analytics ? `${analytics.winRate.toFixed(1)}%` : '—'} up={analytics ? analytics.winRate >= 50 : undefined} />
-                    <Stat label="Profit Factor" value={analytics ? analytics.profitFactor.toFixed(2) : '—'} up={analytics ? analytics.profitFactor >= 1.5 : undefined} />
-                    <Stat label="Expectancy" value={analytics ? `₹${analytics.expectancy.toFixed(0)}` : '—'} up={analytics ? analytics.expectancy > 0 : undefined} />
+                    <Stat label="Net Profit Factor" value={analytics ? (analytics.netProfitFactor ?? analytics.profitFactor).toFixed(2) : '—'} up={analytics ? (analytics.netProfitFactor ?? analytics.profitFactor) >= 1.5 : undefined} />
+                    <Stat label="Gross Profit Factor" value={analytics ? (analytics.grossProfitFactor ?? analytics.profitFactor).toFixed(2) : '—'} up={analytics ? (analytics.grossProfitFactor ?? analytics.profitFactor) >= 1.5 : undefined} />
+                    <Stat label="Payoff Ratio" value={analytics ? `${analytics.payoffRatio?.toFixed(2) ?? '—'}x` : '—'} up={analytics ? analytics.payoffRatio >= 1.5 : undefined} />
                   </div>
                   {analytics && (
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
-                      <MetricCard label="Avg Win" value={`₹${analytics.avgWin.toFixed(0)}`} icon={TrendingUp} good />
-                      <MetricCard label="Avg Loss" value={`₹${analytics.avgLoss.toFixed(0)}`} icon={TrendingDown} bad />
-                      <MetricCard label="Avg RR" value={`${analytics.avgRR.toFixed(2)}x`} icon={Target} good={analytics.avgRR >= 1.5} />
+                      <MetricCard label="Expectancy" value={`₹${analytics.expectancy.toFixed(0)}`} icon={Target} good={analytics.expectancy > 0} />
+                      <MetricCard label="Total Charges" value={`₹${analytics.totalCharges?.toFixed(0) ?? '—'}`} icon={MinusCircle} bad={analytics.totalCharges > 0} />
+                      <MetricCard label="DP Leakage Drag" value={`₹${analytics.dpFeeLeakage?.toFixed(0) ?? '—'}`} icon={AlertTriangle} bad={analytics.dpFeeLeakage > 0} />
                       <MetricCard label="Net P&L" value={`₹${analytics.netPnl.toFixed(0)}`} icon={Activity} good={analytics.netPnl > 0} bad={analytics.netPnl < 0} />
                     </div>
                   )}

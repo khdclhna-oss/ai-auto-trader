@@ -246,15 +246,23 @@ def analyze_15min(df: pd.DataFrame) -> TimeframeBias:
     if "volume" in df.columns:
         vol = df["volume"]
         avg_vol = vol.rolling(20).mean()
-        if len(avg_vol.dropna()) > 0 and avg_vol.iloc[-1] > 0:
-            vol_ratio = float(vol.iloc[-1]) / float(avg_vol.iloc[-1])
+        
+        # V4.2: Strict volume validation. If avg_vol is 0 or missing, it's a GHOST SIGNAL.
+        last_avg = float(avg_vol.iloc[-1]) if not avg_vol.empty else 0.0
+        last_vol = float(vol.iloc[-1]) if not vol.empty else 0.0
+        
+        if last_avg <= 0 or last_vol == 0:
+            direction = -99  # V4.2: Nuclear reject for missing/zero volume
+            strength = 0.0
+            reasons.append("ZERO VOLUME/DATA MISSING — signal killed")
+        else:
+            vol_ratio = last_vol / last_avg
             indicators["vol_ratio"] = vol_ratio
             if vol_ratio > 1.5:
                 strength += 0.3
                 reasons.append(f"Volume spike ({vol_ratio:.1f}x average)")
-            elif vol_ratio < 0.5:
-                # V3.5: Hard reject — no institutional participation to confirm the move
-                direction = 0
+            elif vol_ratio < 0.8:  # V4.2: Raised from 0.5 to 0.8 (Institutional Alpha)
+                direction = -99  # Kill signal
                 strength = 0.0
                 reasons.append(f"LOW VOLUME REJECT ({vol_ratio:.1f}x avg) — signal killed")
 
@@ -348,10 +356,14 @@ def get_confluence(stock: str, frames: dict, regime: str) -> ConfluenceResult:
         )
 
     # TRENDING or VOLATILE: require all 3 timeframes aligned + strict confluence
-    buy_threshold = 4    # Need at least 4 confluence points
-    sell_threshold = -4  # Need at least -4 confluence points
+    # V4.2: Standardized to 6 (synced with signals.py)
+    buy_threshold = 6    
+    sell_threshold = -2  
 
-    if confluence >= buy_threshold:
+    if any(bias.direction == -99 for bias in [daily, hourly, quarter]):
+        action = "HOLD"
+        all_reasons.append("HARD REJECT (One or more timeframes killed the signal)")
+    elif confluence >= buy_threshold:
         action = "BUY"
     elif confluence <= sell_threshold:
         action = "SELL"

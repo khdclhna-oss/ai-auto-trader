@@ -17,18 +17,19 @@ import pandas_ta as ta
 from dataclasses import dataclass
 from typing import Optional
 
+from calculator import calculate_realistic_charges
+
 
 # Configuration (V3.6)
-RISK_PER_TRADE      = 0.01   # V3.6: dialled from 3% → 1% during tuning phase.
+RISK_PER_TRADE      = 0.015  # V4.1: increased from 1% to 1.5% to dilute fixed charges.
                               # Restore to 0.02 once system shows +expectancy over 50+ trades.
 ATR_SL_MULTIPLIER   = 2.5    # stop = entry - 2.5*ATR (widened to survive noise)
 ATR_TP_MULTIPLIER   = 5.0    # target = entry + 5*ATR (aims for 1:2 RRR minimum)
 TRAIL_ACTIVATION    = 3.0    # activate trailing after 3*ATR profit
 TRAIL_DISTANCE      = 2.5    # trail stop by 2.5*ATR once activated
 MAX_POSITIONS       = 5      # max simultaneous positions
-MAX_COST_TO_RISK    = 0.15   # V4.0: reject if charges > 15% of planned risk amount
-                              # Data: avg charges were >50% of gross P&L — tightened from 20%.
-
+MAX_COST_TO_RISK    = 0.20   # reject if charges consume >20% of planned risk
+MIN_REWARD_TO_COST  = 4.0    # planned reward must be at least 4x estimated charges
 
 @dataclass
 class PositionPlan:
@@ -44,6 +45,9 @@ class PositionPlan:
     atr: float
     reward_risk_ratio: float
     regime_adjusted: bool  # True if size was reduced due to volatility
+    estimated_charges: float = 0.0
+    cost_to_risk: float = 0.0
+    reward_to_cost: float = 0.0
 
 
 @dataclass
@@ -97,6 +101,10 @@ def plan_position(
     target_2 = round(entry_price + (2.0 * sl_distance), 2)
     target_3 = round(entry_price + (4.0 * sl_distance), 2) # Initial target, will trail
 
+    # Inverted stop loss & targets validation (R1)
+    if stop_loss >= entry_price or target_1 <= entry_price or target_2 <= entry_price or target_3 <= entry_price:
+        return None
+
     # Reward:risk ratio (blended for the first 2 tranches)
     rr_ratio = (target_2 - entry_price) / sl_distance if sl_distance > 0 else 0
     
@@ -124,10 +132,18 @@ def plan_position(
             return None
 
     # V3.6: Cost-to-Risk Gate
-    trade_value = entry_price * quantity
-    estimated_charges = (trade_value * 0.002) + 15.93
-    if estimated_charges / risk_amount > MAX_COST_TO_RISK:
-        # Charges eat too much of the planned risk budget — not worth taking
+    estimated_charges = calculate_realistic_charges(
+        entry_price,
+        target_2,
+        quantity,
+        is_intraday=False,
+    ).total
+    planned_risk = sl_distance * quantity
+    planned_reward = max(0.0, (target_2 - entry_price) * quantity)
+    cost_to_risk = estimated_charges / planned_risk if planned_risk > 0 else float("inf")
+    reward_to_cost = planned_reward / estimated_charges if estimated_charges > 0 else float("inf")
+    if cost_to_risk > MAX_COST_TO_RISK or reward_to_cost < MIN_REWARD_TO_COST:
+        # Charges eat too much of the planned edge; skip instead of donating fees.
         return None
 
     return PositionPlan(
@@ -142,6 +158,9 @@ def plan_position(
         atr=atr,
         reward_risk_ratio=rr_ratio,
         regime_adjusted=regime_adjusted,
+        estimated_charges=estimated_charges,
+        cost_to_risk=cost_to_risk,
+        reward_to_cost=reward_to_cost,
     )
 
 

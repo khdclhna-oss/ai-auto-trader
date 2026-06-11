@@ -335,14 +335,14 @@ export default function Dashboard() {
             <div>
               <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-0.5">India VIX</p>
               <p className={`text-xs font-semibold ${status.macro.vix_ok ? 'text-emerald-400' : 'text-orange-400'}`}>
-                {status.macro.vix_ok ? '🟢 ' : '⚠️ '}{status.macro.vix.toFixed(2)}
+                {status.macro.vix_ok ? '🟢 ' : '⚠️ '}{n(status.macro.vix).toFixed(2)}
               </p>
             </div>
 
             <div>
               <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-0.5">Market Breadth</p>
               <p className={`text-xs font-semibold ${status.macro.breadth_ok ? 'text-emerald-400' : 'text-red-400'}`}>
-                {status.macro.breadth_ok ? '🟢 ' : '🔴 '}{status.macro.breadth_pct.toFixed(1)}%
+                {status.macro.breadth_ok ? '🟢 ' : '🔴 '}{n(status.macro.breadth_pct).toFixed(1)}%
               </p>
             </div>
           </motion.div>

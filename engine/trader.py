@@ -358,7 +358,7 @@ def run():
             elif not market_open:
                 block_reason = "market closed"
             print(f"  ℹ {block_reason.title()} and no open positions. Standby mode.")
-            finish_log('MACRO_BLOCKED' if macro_blocked else 'MARKET_CLOSED')
+            finish_log('SUCCESS' if macro_blocked else 'MARKET_CLOSED')
             return
 
     # ─── V4 Layer 3: Opportunity Ranking (only when entries allowed) ──────────

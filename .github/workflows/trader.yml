@@ -2,6 +2,7 @@ name: AI Auto Trader
 
 on:
   schedule:
+    # Every 15 min on weekdays during NSE hours (3:30–10:00 UTC = 9:00–15:30 IST)
     - cron: '*/15 3-10 * * 1-5'
   workflow_dispatch:
     inputs:
@@ -15,24 +16,33 @@ on:
 jobs:
   trade:
     runs-on: ubuntu-latest
+    timeout-minutes: 10        # ← Kill job if it hangs for more than 10 min
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
+
       - name: Install dependencies
         run: pip install -r requirements.txt
+
       - name: Run trader
         if: ${{ github.event.inputs.run_backtest != 'true' }}
+        timeout-minutes: 8     # ← Step-level timeout (inside job timeout)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python engine/trader.py
+        run: |
+          cd engine
+          timeout 420 python trader.py || echo "Trader timed out after 7 min"
+
       - name: Run backtest
         if: ${{ github.event.inputs.run_backtest == 'true' }}
+        timeout-minutes: 8
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

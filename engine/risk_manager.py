@@ -23,9 +23,9 @@ from calculator import calculate_realistic_charges
 # Configuration (V3.6)
 RISK_PER_TRADE      = 0.015  # V4.1: increased from 1% to 1.5% to dilute fixed charges.
                               # Restore to 0.02 once system shows +expectancy over 50+ trades.
-ATR_SL_MULTIPLIER   = 2.5    # stop = entry - 2.5*ATR (widened to survive noise)
+ATR_SL_MULTIPLIER   = 2.0    # stop = entry - 2.0*ATR (tightened for better R:R)
 ATR_TP_MULTIPLIER   = 5.0    # target = entry + 5*ATR (aims for 1:2 RRR minimum)
-TRAIL_ACTIVATION    = 3.0    # activate trailing after 3*ATR profit
+TRAIL_ACTIVATION    = 2.0    # activate trailing after 2*ATR profit
 TRAIL_DISTANCE      = 2.5    # trail stop by 2.5*ATR once activated
 MAX_POSITIONS       = 5      # max simultaneous positions
 MAX_COST_TO_RISK    = 0.20   # reject if charges consume >20% of planned risk

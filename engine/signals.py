@@ -25,13 +25,13 @@ from risk_manager import plan_position
 
 # ─── Constants (single source of truth, synced with trader.py) ────────────────
 BUY_THRESHOLD        = 6    # Default threshold (TRENDING/RANGING regimes)
-VOLATILE_BUY_THRESHOLD = 5  # V4.1: VOLATILE regime uses lower threshold — 55% WR at score-5+
+VOLATILE_BUY_THRESHOLD = 7  # V4.3: VOLATILE regime uses stricter threshold
 SELL_THRESHOLD       = -2   # score at which a held position gets a confluence sell
 PRICE_SANITY_PCT     = 20   # reject bars with >20% change (split/stale data guard)
 GAP_SLIPPAGE         = 0.001  # 0.1% extra fill haircut for gap-through exits
 MIN_TARGET_PCT       = 3.5  # V4.2: Raised from 2.0% to offset ₹113/trade average charges
 ATR_VOL_FLOOR        = 0.005  # V4.2: 0.5% ATR floor (reject "dead" stocks)
-MIN_VOL_RATIO        = 0.5   # V4.1: Lowered from 1.2x — data shows low-vol entries win more (42% WR vs 14%)
+MIN_VOL_RATIO        = 1.0   # V4.3: Enforce minimum average volume for breakouts
 
 # V4.1: Sentiment re-enabled. Gemini LLM adds +1/-1 edge on borderline setups.
 # Previously disabled because all 31 trades returned 0.0 — now activating for live coverage.

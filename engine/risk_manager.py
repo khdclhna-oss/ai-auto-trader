@@ -12,6 +12,7 @@ Key principles:
   5. Volatile regime → halve position size
 """
 
+import math
 import pandas as pd
 import pandas_ta as ta
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ TRAIL_DISTANCE      = 2.5    # trail stop by 2.5*ATR once activated
 MAX_POSITIONS       = 5      # max simultaneous positions
 MAX_COST_TO_RISK    = 0.20   # reject if charges consume >20% of planned risk
 MIN_REWARD_TO_COST  = 4.0    # planned reward must be at least 4x estimated charges
+MIN_HOLD_HOURS      = 2.0    # V5.4: trailing stop only activates after 2h minimum hold
 
 @dataclass
 class PositionPlan:
@@ -64,12 +66,21 @@ class TrailingStopUpdate:
 
 def calculate_atr(df: pd.DataFrame, length: int = 14) -> Optional[float]:
     """Get the current ATR value for a stock."""
-    if len(df) < length + 1:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or len(df) < length + 1:
         return None
+    for col in ["high", "low", "close"]:
+        if col not in df.columns or df[col].dropna().empty:
+            return None
     atr = ta.atr(df["high"], df["low"], df["close"], length=length)
-    if atr is None or len(atr.dropna()) == 0:
+    if atr is None or not isinstance(atr, pd.Series):
         return None
-    return float(atr.dropna().iloc[-1])
+    clean_atr = atr.dropna()
+    if clean_atr.empty:
+        return None
+    last_val = float(clean_atr.iloc[-1])
+    if math.isnan(last_val) or math.isinf(last_val):
+        return None
+    return last_val
 
 
 def plan_position(
@@ -78,6 +89,7 @@ def plan_position(
     atr: float,
     capital: float,
     regime: str,
+    kelly_fraction: Optional[float] = None,
 ) -> Optional[PositionPlan]:
     """
     Calculate the complete trade plan: stop, target, quantity.
@@ -86,8 +98,16 @@ def plan_position(
     not the other way around. We decide how much to risk (2% of capital),
     then calculate how many shares that allows given the ATR-based stop.
     """
-    if atr <= 0 or entry_price <= 0:
+    if (
+        entry_price is None or math.isnan(entry_price) or math.isinf(entry_price) or entry_price <= 0 or
+        atr is None or math.isnan(atr) or math.isinf(atr) or atr <= 0 or
+        capital is None or math.isnan(capital) or math.isinf(capital) or capital <= 0
+    ):
         return None
+
+    if kelly_fraction is not None:
+        if math.isnan(kelly_fraction) or math.isinf(kelly_fraction) or kelly_fraction <= 0:
+            return None
 
     # Dynamic stop and target based on ATR
     sl_distance = ATR_SL_MULTIPLIER * atr
@@ -108,8 +128,9 @@ def plan_position(
     # Reward:risk ratio (blended for the first 2 tranches)
     rr_ratio = (target_2 - entry_price) / sl_distance if sl_distance > 0 else 0
     
-    # Position sizing: risk_amount / stop_distance = quantity
-    risk_amount = capital * RISK_PER_TRADE
+    # Position sizing: use kelly_fraction if provided, otherwise fixed RISK_PER_TRADE
+    effective_risk = kelly_fraction if kelly_fraction is not None else RISK_PER_TRADE
+    risk_amount = capital * effective_risk
     
     # Volatile regime → halve the risk
     regime_adjusted = False
@@ -117,19 +138,20 @@ def plan_position(
         risk_amount *= 0.5
         regime_adjusted = True
 
-    quantity = int(risk_amount / sl_distance)
+    quantity = int(risk_amount / sl_distance) if sl_distance > 0 else 0
+    if quantity < 1:
+        return None
     
-    # Ensure quantity is at least 3 to allow 40/40/20 split
-    if quantity < 3:
-        # If risk budget is too small for tranches, we ensure at least 3 shares if possible
-        quantity = 3
-    
-    # Sanity checks
+    # Sanity checks: limit max exposure to 33% of capital per trade
     total_cost = entry_price * quantity
-    if total_cost > capital * 0.33:  # never deploy more than 33% in one trade
+    if total_cost > capital * 0.33:
         quantity = int((capital * 0.33) / entry_price)
-        if quantity < 3:
+        if quantity < 1:
             return None
+
+    actual_risk = quantity * sl_distance
+    if quantity < 1 or (quantity * entry_price) > (capital * 0.33) or (risk_amount > 0 and actual_risk > risk_amount * 1.05):
+        return None
 
     # V3.6: Cost-to-Risk Gate
     estimated_charges = calculate_realistic_charges(
@@ -171,15 +193,18 @@ def check_trailing_stop(
     current_stop: float,
     atr: float,
     adx: Optional[float] = None,
+    entry_time: Optional[object] = None,
+    current_time: Optional[object] = None,
 ) -> TrailingStopUpdate:
     """
     Manage trailing stops on open positions.
     
     Logic:
-    1. If price hits stop → close the trade
-    2. If price moved 1.5*ATR above entry → activate trailing
-    3. Trail stop = current_price - 1*ATR (ratchets up, never down)
-    4. ADX Decay (V2.5): if ADX < 25 while in profit, slam stop up to 0.5 ATR
+    1. If price hits stop → close the trade (hard stop, always active)
+    2. V5.4: Trailing activation requires MIN_HOLD_HOURS (2h) minimum hold
+    3. If price moved 2.0*ATR above entry AND hold time passed → activate trailing
+    4. Trail stop = current_price - 2.5*ATR (ratchets up, never down)
+    5. ADX Decay (V2.5): if ADX < 25 while in profit, slam stop up to 1.5 ATR
     """
     unrealized_pnl = current_price - entry_price
 
@@ -199,7 +224,20 @@ def check_trailing_stop(
     profit_in_atr = unrealized_pnl / atr if atr > 0 else 0
     new_stop = current_stop
 
-    if profit_in_atr >= TRAIL_ACTIVATION:
+    # V5.4: Only activate trailing after minimum hold period
+    hold_hours = 0.0
+    if entry_time is not None and current_time is not None:
+        try:
+            delta = current_time - entry_time
+            hold_hours = delta.total_seconds() / 3600.0
+        except Exception:
+            hold_hours = MIN_HOLD_HOURS  # If time calc fails, allow trailing
+    else:
+        hold_hours = MIN_HOLD_HOURS  # No time info = assume OK to trail
+
+    trailing_allowed = hold_hours >= MIN_HOLD_HOURS
+
+    if profit_in_atr >= TRAIL_ACTIVATION and trailing_allowed:
         trail_dist = TRAIL_DISTANCE
         
         # ADX Decay Check

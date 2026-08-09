@@ -1,13 +1,8 @@
 """
-engine/signals.py — Shared Signal Evaluation Module
-====================================================
-Single source of truth for QuantumTrader signal generation.
-Both trader.py (live) and backtest.py call evaluate_signal() from here.
-
-Design decisions:
-  - sentiment_fn: real Gemini LLM in live, `lambda s: 0.0` neutral stub in backtest
-  - Price sanity check (>20% bar change) guards both paths
-  - Sentiment-gated final_action: effective_score >= BUY_THRESHOLD required to BUY
+engine/signals.py — Shared Signal Evaluation & Intrabar Exit Engine
+====================================================================
+Single source of truth for QuantumTrader signal evaluation.
+Shared between trader.py (live execution) and backtest.py (backtesting).
 """
 
 import os
@@ -21,27 +16,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from multi_timeframe import get_confluence
 from regime import detect_regime
-from risk_manager import plan_position
+from setups import classify_long_setup, SetupResult
+from risk_manager import plan_position, PositionPlan
 
-# ─── Constants (single source of truth, synced with trader.py) ────────────────
-BUY_THRESHOLD        = 6    # Default threshold (TRENDING/RANGING regimes)
-VOLATILE_BUY_THRESHOLD = 7  # V4.3: VOLATILE regime uses stricter threshold
-SELL_THRESHOLD       = -2   # score at which a held position gets a confluence sell
-PRICE_SANITY_PCT     = 20   # reject bars with >20% change (split/stale data guard)
-GAP_SLIPPAGE         = 0.001  # 0.1% extra fill haircut for gap-through exits
-MIN_TARGET_PCT       = 3.5  # V4.2: Raised from 2.0% to offset ₹113/trade average charges
-ATR_VOL_FLOOR        = 0.005  # V4.2: 0.5% ATR floor (reject "dead" stocks)
-MIN_VOL_RATIO        = 1.0   # V4.3: Enforce minimum average volume for breakouts
-
-# V4.1: Sentiment re-enabled. Gemini LLM adds +1/-1 edge on borderline setups.
-# Previously disabled because all 31 trades returned 0.0 — now activating for live coverage.
-SENTIMENT_ACTIVE = True
+# ─── Constants (single source of truth) ───────────────────────────────────────
+BUY_THRESHOLD          = 6      # Default threshold for TRENDING / RANGING regimes
+VOLATILE_BUY_THRESHOLD = 7      # Stricter threshold for VOLATILE regime
+SELL_THRESHOLD         = -2     # Threshold for confluence SELL signal
+PRICE_SANITY_PCT       = 20.0   # Reject bars moving > 20% (stock split guard)
+GAP_SLIPPAGE           = 0.001  # 0.1% haircut for gap-through exits
+MIN_TARGET_PCT         = 3.5    # Minimum expected move (%) to offset ₹113 charges
+ATR_VOL_FLOOR          = 0.005  # 0.5% ATR floor (reject stagnant stocks)
+MIN_VOL_RATIO          = 1.0    # Minimum volume ratio threshold
+SENTIMENT_ACTIVE       = True   # Enable Gemini LLM news sentiment filter
 
 
 def _default_sentiment(symbol: str) -> float:
-    """Real-time Gemini LLM sentiment. Disabled until non-zero live coverage confirmed."""
+    """Real-time Gemini LLM sentiment scoring function."""
     if not SENTIMENT_ACTIVE:
-        return 0.0  # V3.6: All 31 trades had score=0 — LLM is inactive in production
+        return 0.0
     try:
         from sentiment_llm import get_llm_sentiment
         return get_llm_sentiment(symbol)
@@ -50,25 +43,35 @@ def _default_sentiment(symbol: str) -> float:
 
 
 def _neutral_sentiment(symbol: str) -> float:
-    """Neutral stub. Used in backtest to avoid LLM calls and lookahead bias."""
+    """Neutral stub used in backtesting to avoid network calls."""
     return 0.0
 
 
 @dataclass
 class SignalResult:
-    """Output of evaluate_signal()."""
+    """Dataclass encapsulating evaluate_signal() output."""
     symbol: str
-    final_action: str          # BUY / SELL / HOLD
-    effective_score: int        # confluencse_score + sentiment adjustment
-    confluence_score: int       # raw multi-TF score before sentiment
-    sentiment: int              # -1 / 0 / +1 bucket
-    sentiment_score: float      # raw float from LLM
-    reason_str: str
-    price: float
-    atr: float
-    regime: str
-    plan: object                # PositionPlan from risk_manager, or None
-    skipped: bool = False       # True when price sanity or data check failed
+    final_action: str            # "BUY" | "SELL" | "HOLD"
+    effective_score: int         # confluence_score + sentiment adjustment
+    confluence_score: int        # raw multi-TF score + setup bonus
+    sentiment: int               # -1 | 0 | +1
+    sentiment_score: float       # raw LLM score (-1.0 to +1.0)
+    reason_str: str              # Diagnostic rationale log
+    price: float                 # Current close price
+    atr: float                   # 14-period ATR
+    regime: str                  # Market regime ("TRENDING" | "RANGING" | "VOLATILE" | "UNKNOWN")
+    plan: Optional[object]       # PositionPlan object from risk_manager or None
+    skipped: bool = False        # True if bar failed sanity/volatility floor checks
+    setup_type: str = "UNCLASSIFIED" # Qualified setup name
+    setup: str = "UNCLASSIFIED"  # Alias for setup_type for backward compatibility
+    volume_ratio: float = 1.0    # Relative volume ratio
+    liquidity_cap_qty: int = 0   # Liquidity cap quantity
+
+    def __post_init__(self):
+        if self.setup == "UNCLASSIFIED" and self.setup_type != "UNCLASSIFIED":
+            object.__setattr__(self, "setup", self.setup_type)
+        elif self.setup_type == "UNCLASSIFIED" and self.setup != "UNCLASSIFIED":
+            object.__setattr__(self, "setup_type", self.setup)
 
 
 def evaluate_signal(
@@ -79,63 +82,63 @@ def evaluate_signal(
     held_stocks: set,
     sentiment_fn: Callable[[str], float] = _default_sentiment,
     open_count: int = 0,
-    max_positions: int = 10,
+    max_positions: int = 5,
+    kelly_fraction: Optional[float] = None,
 ) -> SignalResult:
     """
-    Evaluate a trading signal for `symbol` using the supplied OHLC frames dict.
-
-    Parameters
-    ----------
-    symbol        : Full ticker e.g. "RELIANCE.NS"
-    frames        : {"1d": df_daily, "1h": df_hourly, "15m": df_15m}
-                    In backtest FULL mode, all three are present.
-                    In backtest DEGRADED mode, only "1d" is guaranteed.
-    capital       : Current total portfolio capital
-    cash          : Available cash (for position sizing)
-    held_stocks   : Set of strings of currently held symbols
-    sentiment_fn  : Callable[str -> float], default = real Gemini LLM
-    open_count    : Number of currently open positions
-    max_positions : Maximum allowed concurrent positions
+    Evaluate trading signal for symbol using 1d, 1h, 15m OHLC frames.
     """
-
     df_15 = frames.get("15m")
     df_daily = frames.get("1d")
-    short_name = symbol.replace(".NS", "")
 
-    # Need at least 2 bars to compute the price sanity check
+    # Step 1: Input Validation
     if df_15 is None or len(df_15) < 2:
-        return SignalResult(symbol, "HOLD", 0, 0, 0, 0.0, "Insufficient 15m data", 0.0, 0.0, "UNKNOWN", None, skipped=True)
+        return SignalResult(symbol, "HOLD", 0, 0, 0, 0.0, "Insufficient 15m data (< 2 bars)", 0.0, 0.0, "UNKNOWN", None, skipped=True)
 
-    # ── Step 1: Regime ────────────────────────────────────────────────────────
+    # Extract actual close price upfront for telemetry and sanity checks
+    close_price = float(df_15["close"].iloc[-1])
+
+    # Step 2: Regime Detection
     regime_src = df_daily if (df_daily is not None and len(df_daily) > 50) else df_15
     regime_result = detect_regime(regime_src)
-    if regime_result.regime == "RANGING":
+    regime = regime_result.regime
+    adx_val = regime_result.adx
+
+    # Step 3: Setup Classification
+    setup_res: SetupResult = classify_long_setup(frames, regime=regime, adx=adx_val)
+
+    # Step 4: Price Sanity Guard (Executed BEFORE Strict Regime Gate to catch extreme bar anomalies)
+    prev_close = float(df_15["close"].iloc[-2])
+    chg_pct = abs((close_price - prev_close) / prev_close) * 100.0 if prev_close > 0 else 0.0
+    if chg_pct > PRICE_SANITY_PCT:
         return SignalResult(
-            symbol,
-            "HOLD",
-            0,
-            0,
-            0,
-            0.0,
-            "RANGING regime hard block",
-            0.0,
-            0.0,
-            regime_result.regime,
-            None,
-            skipped=True,
+            symbol, "HOLD", 0, 0, 0, 0.0,
+            f"PRICE SANITY REJECT: {chg_pct:.1f}% bar move exceeds limit ({PRICE_SANITY_PCT}%)",
+            close_price, 0.0, regime, None, skipped=True, setup_type=setup_res.name, volume_ratio=setup_res.rvol_15m
         )
 
-    # ── Step 2: Multi-timeframe confluence ────────────────────────────────────
-    confluence = get_confluence(symbol, frames, regime_result.regime)
+    # Step 5: Strict Regime Gating (Prevents RANGING leakage & catch-falling-knives in TRENDING)
+    if regime == "RANGING" and setup_res.name != "MEAN_REVERSION":
+        return SignalResult(
+            symbol, "HOLD", 0, 0, 0, 0.0,
+            f"STRICT REGIME GATE: RANGING regime blocks non-mean-reversion setup '{setup_res.name}'",
+            close_price, 0.0, regime, None, skipped=True, setup_type=setup_res.name, volume_ratio=setup_res.rvol_15m
+        )
 
-    # ── Step 3: Sentiment-adjusted score ─────────────────────────────────────
-    # [P0 FIX] Lazy LLM Evaluation: Only query the LLM if the technical confluence
-    # is close enough to a threshold that a +1/-1 from sentiment could trigger a trade.
-    # BUY needs score >= 4, so query if confluence >= 3.  SELL needs <= -2, so query if <= -1.
-    score = confluence.confluence_score
-    # V3.6: Only call LLM if sentiment is actually active (currently disabled).
-    # When SENTIMENT_ACTIVE=False, sentiment_score is always 0.0 — skip the call entirely.
-    if SENTIMENT_ACTIVE and (score >= (BUY_THRESHOLD - 1) or score <= (SELL_THRESHOLD + 1)):
+    if regime == "TRENDING" and setup_res.name == "MEAN_REVERSION":
+        return SignalResult(
+            symbol, "HOLD", 0, 0, 0, 0.0,
+            f"STRICT REGIME GATE: TRENDING regime blocks mean-reversion setup '{setup_res.name}'",
+            close_price, 0.0, regime, None, skipped=True, setup_type=setup_res.name, volume_ratio=setup_res.rvol_15m
+        )
+
+    # Step 6: Multi-Timeframe Confluence Engine
+    confluence = get_confluence(symbol, frames, regime)
+    raw_score = confluence.confluence_score + setup_res.score_bonus
+
+    # Step 7: Sentiment Adjustment & Lazy LLM Evaluation
+    effective_buy_threshold = VOLATILE_BUY_THRESHOLD if regime == "VOLATILE" else BUY_THRESHOLD
+    if SENTIMENT_ACTIVE and (raw_score >= (effective_buy_threshold - 1) or raw_score <= (SELL_THRESHOLD + 1)):
         sentiment_score = sentiment_fn(symbol)
     else:
         sentiment_score = 0.0
@@ -143,132 +146,121 @@ def evaluate_signal(
     sentiment = 0
     if sentiment_score > 0.3:  sentiment = 1
     if sentiment_score < -0.3: sentiment = -1
-    effective_score = confluence.confluence_score + sentiment
+    effective_score = raw_score + sentiment
 
-    # ── Step 4: Price sanity check ────────────────────────────────────────────
-    price    = float(df_15["close"].iloc[-1])
-    prev_close = float(df_15["close"].iloc[-2])
-    chg_pct = abs((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
-    if chg_pct > PRICE_SANITY_PCT:
-        reason = f"PRICE ANOMALY: {chg_pct:.1f}% bar move — skipped"
-        return SignalResult(symbol, "HOLD", effective_score, confluence.confluence_score,
-                            sentiment, sentiment_score, reason, price, 0.0,
-                            regime_result.regime, None, skipped=True)
-
-    # ── Step 5: ATR ───────────────────────────────────────────────────────────
+    # Step 8: ATR Volatility Floor
     try:
         import pandas_ta as ta
-        atr_series = ta.atr(df_15["high"], df_15["low"], df_15["close"], length=14)
-        atr = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.isna().iloc[-1] else price * 0.01
+        atr_series = ta.atr(df_15["high"].astype(float), df_15["low"].astype(float), df_15["close"].astype(float), length=14)
+        atr = float(atr_series.iloc[-1]) if (atr_series is not None and not atr_series.isna().iloc[-1]) else close_price * 0.01
     except Exception:
-        atr = price * 0.01
+        atr = close_price * 0.01
 
-    # V4.2: ATR Volatility Floor
-    volatility_pct = (atr / price) * 100 if price > 0 else 0
-    if volatility_pct < (ATR_VOL_FLOOR * 100):
-        reason_str = f"VOLATILITY TOO LOW ({volatility_pct:.2f}% < {ATR_VOL_FLOOR*100:.2f}%) — signal killed"
-        return SignalResult(symbol, "HOLD", effective_score, confluence.confluence_score,
-                            sentiment, sentiment_score, reason_str, price, atr,
-                            regime_result.regime, None, skipped=True)
+    volatility_pct = (atr / close_price) * 100.0 if close_price > 0 else 0.0
+    if volatility_pct < (ATR_VOL_FLOOR * 100.0):
+        return SignalResult(
+            symbol, "HOLD", effective_score, raw_score, sentiment, sentiment_score,
+            f"ATR FLOOR REJECT: Volatility ({volatility_pct:.2f}%) < floor ({ATR_VOL_FLOOR*100.0:.2f}%)",
+            close_price, atr, regime, None, skipped=True, setup_type=setup_res.name, volume_ratio=setup_res.rvol_15m
+        )
 
-    # ── Step 6: Sentiment-gated final action ──────────────────────────────────
-    # V4.1: VOLATILE regime uses a lower BUY threshold (5 vs 6)
-    # Data: VOLATILE regime has 55% WR vs 23% RANGING, 29% TRENDING
-    effective_buy_threshold = VOLATILE_BUY_THRESHOLD if regime_result.regime == "VOLATILE" else BUY_THRESHOLD
-
-    # [P0 FIX] final_action is derived from effective_score, but MUST respect hard HOLD constraints 
-    # (like the RANGING regime filter) from the confluence engine.
+    # Step 9: Action Determination
     if confluence.action == "HOLD":
         final_action = "HOLD"
-    elif effective_score >= effective_buy_threshold:
+    elif effective_score >= effective_buy_threshold and setup_res.eligible:
         final_action = "BUY"
     elif effective_score <= SELL_THRESHOLD:
         final_action = "SELL"
     else:
         final_action = "HOLD"
 
-    # Build reason string
     reason_parts = confluence.reasons.copy()
-    if sentiment > 0:  reason_parts.append(f"Positive news +1 ({sentiment_score:+.2f})")
-    elif sentiment < 0: reason_parts.append(f"Negative news -1 ({sentiment_score:+.2f})")
+    reason_parts.append(f"Setup: {setup_res.name} ({setup_res.reason})")
+    if sentiment > 0:  reason_parts.append(f"Positive LLM news +1 ({sentiment_score:+.2f})")
+    elif sentiment < 0: reason_parts.append(f"Negative LLM news -1 ({sentiment_score:+.2f})")
     reason_str = " | ".join(reason_parts) + f" -> score {effective_score:+d} -> {final_action}"
 
-    # V4.1 Volume Filter (Softened)
-    # Data analysis: Low-vol entries (<0.2x avg) have 42% WR vs 14% for high-vol
-    # Previous 1.2x threshold was blocking profitable low-vol consolidation entries
-    # New filter: only blocks extreme volatility spikes (chasing momentum = bad)
-    vol_ratio = 1.0
-    if confluence.quarter and hasattr(confluence.quarter, 'indicators') and confluence.quarter.indicators:
-        vol_ratio = confluence.quarter.indicators.get('vol_ratio', 1.0)
-    if final_action == "BUY" and vol_ratio < MIN_VOL_RATIO:
-        reason_str += f" | VOLUME INSUFFICIENT ({vol_ratio:.2f}x < {MIN_VOL_RATIO:.1f}x) — SKIPPED"
+    # Volume check
+    rvol_val = setup_res.rvol_15m
+    if final_action == "BUY" and rvol_val < MIN_VOL_RATIO:
+        reason_str += f" | INSUFFICIENT RVOL ({rvol_val:.2f}x < {MIN_VOL_RATIO:.1f}x) — SKIPPED"
         final_action = "HOLD"
 
-
-    # ── Step 7: Position plan (only if BUY warranted) ─────────────────────────
+    # Step 10: Position Sizing & Target Move Gate
+    # V5.5: Score-scaled Kelly — higher-confidence signals get larger positions
     plan = None
     if final_action == "BUY" and symbol not in held_stocks and open_count < max_positions and cash > 0:
+        # Scale kelly fraction by signal strength: score 6=1.0x, 7=1.2x, 8+=1.5x
+        score_multiplier = 1.0
+        if effective_score >= 8:
+            score_multiplier = 1.5
+        elif effective_score >= 7:
+            score_multiplier = 1.2
+        scaled_kelly = (kelly_fraction * score_multiplier) if kelly_fraction is not None else None
+
         plan = plan_position(
             stock=symbol,
-            entry_price=price,
+            entry_price=close_price,
             atr=atr,
             capital=capital,
-            regime=regime_result.regime,
+            regime=regime,
+            kelly_fraction=scaled_kelly,
         )
-        # V3.5: Minimum expected-move filter
-        # If the target can't move > MIN_TARGET_PCT from entry, charges eat the edge
         if plan is not None:
-            # V4.1: Check if the primary target (Tranche 2) moves enough to justify charges
-            target_move_pct = (plan.target_2 - plan.entry_price) / plan.entry_price * 100
+            target_move_pct = (plan.target_2 - plan.entry_price) / plan.entry_price * 100.0 if plan.entry_price > 0 else 0.0
             if target_move_pct < MIN_TARGET_PCT:
-                reason_str += f" | PRIMARY TARGET TOO SMALL ({target_move_pct:.1f}% < {MIN_TARGET_PCT}%) — SKIPPED"
+                reason_str += f" | TARGET MOVE TOO SMALL ({target_move_pct:.1f}% < {MIN_TARGET_PCT}%) — SKIPPED"
                 final_action = "HOLD"
                 plan = None
             else:
-                reason_str += f" | cost/risk {plan.cost_to_risk:.0%} | reward/cost {plan.reward_to_cost:.1f}x"
+                reason_str += f" | cost/risk {plan.cost_to_risk:.0%} | reward/cost {plan.reward_to_cost:.1f}x | score_mult {score_multiplier:.1f}x"
         else:
-            reason_str += " | COST/RISK OR SIZE GATE FAILED -> HOLD"
+            reason_str += " | RISK MANAGER GATE OR SIZING FAILED -> HOLD"
             final_action = "HOLD"
 
     return SignalResult(
         symbol=symbol,
         final_action=final_action,
         effective_score=effective_score,
-        confluence_score=confluence.confluence_score,
+        confluence_score=raw_score,
         sentiment=sentiment,
         sentiment_score=sentiment_score,
         reason_str=reason_str,
-        price=price,
+        price=close_price,
         atr=atr,
-        regime=regime_result.regime,
+        regime=regime,
         plan=plan,
         skipped=False,
+        setup_type=setup_res.name,
+        volume_ratio=rvol_val,
     )
 
 
-def apply_intrabar_exit(bar, entry: float, sl: float, target: float, qty: int,
-                        entry_time, current_time) -> Optional[dict]:
+def apply_intrabar_exit(
+    bar: pd.Series,
+    entry: float,
+    sl: float,
+    target: float,
+    qty: int,
+    entry_time: object,
+    current_time: object,
+) -> Optional[dict]:
     """
-    Given a completed OHLC bar, determine if SL or TP was hit.
-    Priority rule: if same bar hits both, stop wins (conservative).
-
-    Returns dict with 'type' ('SL'|'TP'|None), 'fill_price', 'note', or None.
+    Evaluates intrabar TP/SL hits. Conservative priority: SL wins if both hit on same bar.
     """
-    bar_open  = float(bar["open"])
-    bar_high  = float(bar["high"])
-    bar_low   = float(bar["low"])
+    bar_open = float(bar["open"])
+    bar_high = float(bar["high"])
+    bar_low  = float(bar["low"])
 
-    stop_breached  = bar_low  <= sl
+    stop_breached = bar_low <= sl
     target_reached = bar_high >= target
 
     if stop_breached and target_reached:
-        # Same-bar: conservative, stop wins
-        target_reached = False
+        target_reached = False  # SL takes priority
 
     if target_reached:
         if bar_open >= target:
-            # Gapped above target — partial slippage at open
-            fill_price = bar_open * (1 - GAP_SLIPPAGE)
+            fill_price = bar_open * (1.0 - GAP_SLIPPAGE)
             note = f"Gap-through TP (open ₹{bar_open:.2f} > TP ₹{target:.2f})"
         else:
             fill_price = target
@@ -277,12 +269,11 @@ def apply_intrabar_exit(bar, entry: float, sl: float, target: float, qty: int,
 
     if stop_breached:
         if bar_open <= sl:
-            # Gapped below stop — fill at open with haircut
-            fill_price = bar_open * (1 - GAP_SLIPPAGE)
+            fill_price = bar_open * (1.0 - GAP_SLIPPAGE)
             note = f"Gap-through SL (open ₹{bar_open:.2f} < SL ₹{sl:.2f})"
         else:
             fill_price = sl
             note = f"SL hit (bar L ₹{bar_low:.2f})"
         return {"type": "SL", "fill_price": fill_price, "note": note}
 
-    return None  # no exit this bar
+    return None

@@ -73,6 +73,16 @@ CREATE TABLE IF NOT EXISTS signal_log (
     logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Immutable inputs used for each executed entry; supports setup-level research.
+CREATE TABLE IF NOT EXISTS trade_decisions (
+    id SERIAL PRIMARY KEY,
+    trade_id INTEGER NOT NULL REFERENCES trades(id),
+    stock VARCHAR(20) NOT NULL,
+    setup VARCHAR(40) NOT NULL,
+    snapshot JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- V2: Backtest results (for Phase 3)
 CREATE TABLE IF NOT EXISTS backtest_results (
     id SERIAL PRIMARY KEY,
@@ -96,3 +106,4 @@ CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_equity_time ON equity_snapshots(snapshot_at);
 CREATE INDEX IF NOT EXISTS idx_signal_log_stock ON signal_log(stock);
 CREATE INDEX IF NOT EXISTS idx_signal_log_time ON signal_log(logged_at);
+CREATE INDEX IF NOT EXISTS idx_trade_decisions_setup ON trade_decisions(setup);

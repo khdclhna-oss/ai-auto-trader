@@ -274,11 +274,17 @@ def run():
                 print(f"  ⚠ Sector rotation failed (fail-open, all sectors allowed): {e}")
 
         # ─── V4 Kelly Monitor ─────────────────────────────────────────────────
+        kelly_fraction = None
         try:
             kelly = get_kelly_from_db(db)
-            if not kelly.has_edge:
-                print(f"  ⚠ [kelly] System has NO positive edge yet ({kelly.sample_size} trades). "
-                      f"WR={kelly.win_rate:.0%}, Payoff={kelly.payoff_ratio:.2f}x — TUNING MODE")
+            if kelly.has_edge and kelly.fraction > 0:
+                kelly_fraction = kelly.fraction
+                print(f"  📐 [kelly] Dynamic risk sizing active: {kelly_fraction:.1%}")
+            elif not kelly.has_edge and kelly.sample_size >= 20:
+                kelly_fraction = 0.0
+                print(f"  ⚠ [kelly] System has NO positive edge ({kelly.sample_size} trades). Dynamic risk sizing set to 0.0.")
+            else:
+                print(f"  ⚠ [kelly] System in bootstrap mode ({kelly.sample_size} trades). Using default RISK_PER_TRADE.")
         except Exception as e:
             print(f"  ⚠ Kelly computation failed: {e}")
 
@@ -391,18 +397,33 @@ def run():
 
             sig = evaluate_signal(symbol=symbol, frames=frames, capital=capital, cash=cash,
                                   held_stocks=held_stocks, sentiment_fn=_default_sentiment,
-                                  open_count=open_count, max_positions=MAX_POSITIONS)
+                                  open_count=open_count, max_positions=MAX_POSITIONS,
+                                  kelly_fraction=kelly_fraction)
+            
+            try:
+                db.log_signal(
+                    stock=symbol,
+                    action=sig.final_action,
+                    price=sig.price,
+                    reason=sig.reason_str,
+                    confluence_score=sig.confluence_score,
+                    regime=sig.regime,
+                    atr=sig.atr,
+                    sentiment_score=sig.sentiment_score,
+                    effective_score=sig.effective_score,
+                    setup_type=sig.setup_type,
+                    volume_ratio=sig.volume_ratio,
+                    skipped=sig.skipped,
+                )
+            except Exception as e:
+                print(f"  ⚠ Signal logging failed for {symbol}: {e}")
+
             if sig.skipped:
                 continue
 
             if sig.final_action == "HOLD":
                 continue
             signals_total += 1
-
-            try:
-                db.log_signal(symbol, sig.final_action, sig.price, sig.reason_str, sig.confluence_score, sig.regime, sig.atr, sig.sentiment_score)
-            except Exception as e:
-                print(f"  ⚠ Signal logging failed for {symbol}: {e}")
 
             # Execution
             if sig.final_action == "BUY" and symbol not in held_stocks and open_count < MAX_POSITIONS:
@@ -428,9 +449,9 @@ def run():
                     continue
 
                 # V3.5 Guard 1: RANGING regime double-check at execution time
-                # Data: 13 RANGING trades, 23.1% WR, -₹2,271 total
-                if sig.regime == "RANGING":
-                    print(f"  ⛔ {short_name}: RANGING regime — BUY blocked")
+                # Allow MEAN_REVERSION setup signals in RANGING regimes (Dual-Engine architecture)
+                if sig.regime == "RANGING" and sig.setup_type != "MEAN_REVERSION":
+                    print(f"  ⛔ {short_name}: RANGING regime non-mean-reversion — BUY blocked")
                     continue
 
                 # V3.6: Max 1 new entry per symbol per day
@@ -528,7 +549,7 @@ def run():
             skip_sl = hold_hours < MIN_HOLD_HOURS
             
             # --- 1. FULL STOP LOSS CHECK ---
-            if bar_low <= sl:
+            if not skip_sl and bar_low <= sl:
                 fill_price = bar_open * 0.999 if bar_open < sl else sl
                 c = calculate_realistic_charges(entry, fill_price, qty, False)
                 print(f"  🛑 STOP LOSS hit for {stock} at ₹{fill_price:.2f}")

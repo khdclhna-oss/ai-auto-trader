@@ -49,6 +49,15 @@ CREATE TABLE IF NOT EXISTS signal_log (
     logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS trade_decisions (
+    id SERIAL PRIMARY KEY,
+    trade_id INTEGER NOT NULL REFERENCES trades(id),
+    stock VARCHAR(20) NOT NULL,
+    setup VARCHAR(40) NOT NULL,
+    snapshot JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Backtest results
 CREATE TABLE IF NOT EXISTS backtest_results (
     id SERIAL PRIMARY KEY,
@@ -63,6 +72,7 @@ CREATE TABLE IF NOT EXISTS backtest_results (
 
 CREATE INDEX IF NOT EXISTS idx_signal_log_stock ON signal_log(stock);
 CREATE INDEX IF NOT EXISTS idx_signal_log_time ON signal_log(logged_at);
+CREATE INDEX IF NOT EXISTS idx_trade_decisions_setup ON trade_decisions(setup);
 """
 
 if __name__ == "__main__":

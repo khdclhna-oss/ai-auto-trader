@@ -31,14 +31,41 @@ class Database:
                 raise ValueError("Portfolio table is empty. Did you run the migration?")
             return dict(row)
 
-    def log_signal(self, stock: str, action: str, price: float, reason: str, confluence_score: int, regime: str, atr: float, sentiment_score: float):
-        """Log an actionable signal."""
+    def log_signal(
+        self,
+        stock: str,
+        action: str,
+        price: float,
+        reason: str,
+        confluence_score: int,
+        regime: str,
+        atr: float,
+        sentiment_score: float,
+        effective_score: Optional[int] = None,
+        setup_type: Optional[str] = None,
+        volume_ratio: Optional[float] = None,
+        skipped: Optional[bool] = False,
+    ):
+        """Log an actionable or non-actionable signal for full signal auditing."""
         try:
             with self.conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO signal_log (stock, action, price, reason, confluence_score, regime, atr, sentiment_score, logged_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """, (stock, action, price, reason, confluence_score, regime, atr, sentiment_score))
+                    ALTER TABLE signal_log 
+                    ADD COLUMN IF NOT EXISTS effective_score INT,
+                    ADD COLUMN IF NOT EXISTS setup_type TEXT,
+                    ADD COLUMN IF NOT EXISTS volume_ratio NUMERIC,
+                    ADD COLUMN IF NOT EXISTS skipped BOOLEAN;
+                """)
+                cur.execute("""
+                    INSERT INTO signal_log (
+                        stock, action, price, reason, confluence_score, regime, atr, sentiment_score,
+                        effective_score, setup_type, volume_ratio, skipped, logged_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                """, (
+                    stock, action, price, reason, confluence_score, regime, atr, sentiment_score,
+                    effective_score, setup_type, volume_ratio, skipped
+                ))
             self.conn.commit()
         except Exception as e:
             self.conn.rollback()

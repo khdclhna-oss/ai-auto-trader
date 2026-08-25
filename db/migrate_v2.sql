@@ -52,6 +52,17 @@ ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS regime VARCHAR(20);
 ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS atr NUMERIC(12,4);
 ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS sentiment_score NUMERIC(4,2);
 
+CREATE TABLE IF NOT EXISTS trade_decisions (
+    id SERIAL PRIMARY KEY,
+    trade_id INTEGER NOT NULL REFERENCES trades(id),
+    stock VARCHAR(20) NOT NULL,
+    setup VARCHAR(40) NOT NULL,
+    snapshot JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_decisions_setup ON trade_decisions(setup);
+
 -- Create backtest_results table
 CREATE TABLE IF NOT EXISTS backtest_results (
     id SERIAL PRIMARY KEY,

@@ -229,7 +229,7 @@ def run_backtest(period: str = "2y") -> BacktestResult:
     try:
         raw = yf.download(
             STOCKS, period=period, interval="1d",
-            progress=True, group_by="ticker", auto_adjust=True,
+            progress=False, group_by="ticker", auto_adjust=True,
         )
         for symbol in STOCKS:
             short = symbol.replace(".NS", "")

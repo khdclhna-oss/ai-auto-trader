@@ -5,11 +5,17 @@ The single most impactful layer. 70-80% of NSE large-cap moves
 are explained by index direction. Trading stocks against the index
 is fighting physics.
 
-Gates checked (ALL must pass for new long entries):
+Gates checked:
   1. Nifty 50 is above its 200-day EMA (primary trend intact)
   2. Nifty 50's 50-day EMA slope is positive (near-term uptrend)
   3. India VIX < 20 (not in a fear spike)
   4. Nifty 500 breadth: > 50% of stocks above their 50-day EMA
+
+Regime Classifications:
+  - BULL_TREND      : Primary bull trend + short-term momentum + high breadth. Allows TREND_PULLBACK, BREAKOUT.
+  - SIDEWAYS        : Primary bull trend + VIX ok, but flat momentum or low breadth. Allows MEAN_REVERSION.
+  - BEAR_TREND      : Nifty below 200-EMA. Long entries blocked.
+  - HIGH_VOLATILITY : VIX >= 20. Long entries blocked.
 
 Usage:
     from macro_filter import get_macro_state
@@ -17,12 +23,6 @@ Usage:
     if not state.tradeable:
         print(state.reason)
         return
-
-Design notes:
-  - Results are cached for 30 minutes to avoid re-fetching on every symbol
-  - Fail-open: if data fetch fails, returns tradeable=True with a warning
-    (we don't want a yfinance timeout to halt the entire engine)
-  - Uses Nifty 500 proxy basket for breadth (top 50 stocks from universe)
 """
 
 import time
@@ -53,15 +53,20 @@ BREADTH_BASKET = [
 @dataclass
 class MacroState:
     """Complete macro environment snapshot."""
-    tradeable: bool              # True = macro conditions allow new longs
-    nifty_above_200ema: bool
-    nifty_50ema_slope_up: bool
-    vix: float                   # India VIX level (0 if unavailable)
-    vix_ok: bool                 # True if VIX < 20
-    breadth_pct: float           # % of basket stocks above their 50-EMA (0-100)
-    breadth_ok: bool             # True if breadth_pct > 50
+    tradeable: bool              # True = macro conditions allow standard long entries
+    nifty_above_200ema: bool     # Gate 1: Primary trend
+    nifty_50ema_slope_up: bool   # Gate 2: Short-term momentum
+    vix: float                   # India VIX level (0.0 if unavailable)
+    vix_ok: bool                 # Gate 3: True if VIX < 20.0
+    breadth_pct: float           # Gate 4: % of basket above 50-EMA (0-100)
+    breadth_ok: bool             # Gate 4: True if breadth_pct >= 50.0
     blocked_reasons: list = field(default_factory=list)
     reason: str = ""
+    # ── New Regime Indicators for Dual-Engine Signals (M2 Refactoring) ────────
+    macro_regime: str = "BULL_TREND"  # "BULL_TREND" | "SIDEWAYS" | "BEAR_TREND" | "HIGH_VOLATILITY"
+    regime_bias: str = "BULLISH"     # "BULLISH" | "NEUTRAL" | "BEARISH" | "VOLATILE"
+    allowed_setups: list = field(default_factory=lambda: ["TREND_PULLBACK"])
+    macro_score: float = 100.0        # 0.0 to 100.0 composite market health score
 
 
 def _fetch_nifty_state() -> dict:
@@ -70,38 +75,33 @@ def _fetch_nifty_state() -> dict:
     import pandas_ta as ta
 
     result = {
-        "above_200ema": False,
-        "slope_up_50ema": False,
+        "above_200ema": True,  # Fail-open defaults
+        "slope_up_50ema": True,
         "vix": 0.0,
-        "vix_ok": True,  # fail-open on VIX
+        "vix_ok": True,
     }
 
     try:
         df = yf.download("^NSEI", period="1y", interval="1d",
                          progress=False, auto_adjust=True)
-        if df is None or len(df) < 210:
-            return result
-        # Handle both Index and MultiIndex column structures
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
-        else:
-            df.columns = [c.lower() for c in df.columns]
+        if df is not None and len(df) >= 210:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
+            else:
+                df.columns = [c.lower() for c in df.columns]
 
-        ema200 = ta.ema(df["close"], length=200)
-        ema50  = ta.ema(df["close"], length=50)
+            ema200 = ta.ema(df["close"].astype(float), length=200)
+            ema50  = ta.ema(df["close"].astype(float), length=50)
 
-        if ema200 is not None and len(ema200.dropna()) > 0:
-            result["above_200ema"] = float(df["close"].iloc[-1]) > float(ema200.dropna().iloc[-1])
+            if ema200 is not None and len(ema200.dropna()) > 0:
+                result["above_200ema"] = float(df["close"].iloc[-1]) > float(ema200.dropna().iloc[-1])
 
-        if ema50 is not None and len(ema50.dropna()) > 5:
-            clean = ema50.dropna()
-            # Slope: today's EMA vs 5 days ago
-            result["slope_up_50ema"] = float(clean.iloc[-1]) > float(clean.iloc[-6])
+            if ema50 is not None and len(ema50.dropna()) > 5:
+                clean = ema50.dropna()
+                result["slope_up_50ema"] = float(clean.iloc[-1]) > float(clean.iloc[-6])
 
     except Exception as e:
-        import traceback
-        print(f"  ⚠ [macro] Nifty fetch failed: {e}")
-        # traceback.print_exc()
+        print(f"  [WARN] [macro] Nifty fetch failed: {e}")
 
     # India VIX
     try:
@@ -116,7 +116,7 @@ def _fetch_nifty_state() -> dict:
             result["vix"] = vix_val
             result["vix_ok"] = vix_val < 20.0
     except Exception as e:
-        print(f"  ⚠ [macro] VIX fetch failed: {e}")
+        print(f"  [WARN] [macro] VIX fetch failed: {e}")
 
     return result
 
@@ -142,14 +142,13 @@ def _compute_breadth(breadth_basket: list) -> float:
                 df = df_all[ticker].copy() if ticker in df_all else None
                 if df is None or len(df) < 55:
                     continue
-                
-                # Handle MultiIndex if necessary
+
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
                 else:
                     df.columns = [c.lower() for c in df.columns]
 
-                ema50 = ta.ema(df["close"], length=50)
+                ema50 = ta.ema(df["close"].astype(float), length=50)
                 if ema50 is None or ema50.isna().iloc[-1]:
                     continue
                 total += 1
@@ -158,11 +157,11 @@ def _compute_breadth(breadth_basket: list) -> float:
             except Exception:
                 continue
 
-        return (above_count / total * 100) if total > 0 else 50.0  # neutral if data missing
+        return (above_count / total * 100.0) if total > 0 else 50.0
 
     except Exception as e:
-        print(f"  ⚠ [macro] Breadth computation failed: {e}")
-        return 50.0  # neutral fallback
+        print(f"  [WARN] [macro] Breadth computation failed: {e}")
+        return 50.0
 
 
 def get_macro_state(
@@ -185,10 +184,10 @@ def get_macro_state(
     if use_cache and cache_key in _cache:
         ts, cached = _cache[cache_key]
         if time.time() - ts < CACHE_TTL_SECONDS:
-            print("  📋 [macro] Using cached macro state")
+            print("  [INFO] [macro] Using cached macro state")
             return cached
 
-    print("  🌐 [macro] Fetching Nifty + VIX + breadth...")
+    print("  [INFO] [macro] Fetching Nifty + VIX + breadth...")
 
     nifty = _fetch_nifty_state()
     breadth_pct = _compute_breadth(BREADTH_BASKET)
@@ -203,8 +202,41 @@ def get_macro_state(
     if breadth_pct < breadth_threshold:
         blocked.append(f"Breadth weak ({breadth_pct:.0f}% above 50-EMA < {breadth_threshold}%)")
 
-    tradeable = len(blocked) == 0
-    reason = " | ".join(blocked) if blocked else "Macro conditions clear — longs allowed"
+    # Macro score calculation
+    score_200 = 100.0 if nifty["above_200ema"] else 0.0
+    score_50 = 100.0 if nifty["slope_up_50ema"] else 0.0
+    score_vix = 100.0 if nifty["vix_ok"] else 0.0
+    score_breadth = min(100.0, max(0.0, float(breadth_pct)))
+    macro_score = round(0.30 * score_200 + 0.25 * score_50 + 0.25 * score_vix + 0.20 * score_breadth, 1)
+
+    # Regime Determination
+    if nifty["vix"] >= vix_threshold and nifty["vix"] > 0:
+        macro_regime = "HIGH_VOLATILITY"
+        regime_bias = "VOLATILE"
+        allowed_setups = []
+        tradeable = False
+    elif not nifty["above_200ema"]:
+        macro_regime = "BEAR_TREND"
+        regime_bias = "BEARISH"
+        allowed_setups = []
+        tradeable = False
+    elif nifty["above_200ema"] and nifty["slope_up_50ema"] and nifty["vix_ok"] and (breadth_pct >= breadth_threshold):
+        macro_regime = "BULL_TREND"
+        regime_bias = "BULLISH"
+        allowed_setups = ["TREND_PULLBACK", "BREAKOUT"]
+        tradeable = True
+    elif nifty["above_200ema"] and nifty["vix_ok"]:
+        macro_regime = "SIDEWAYS"
+        regime_bias = "NEUTRAL"
+        allowed_setups = ["MEAN_REVERSION"]
+        tradeable = True
+    else:
+        macro_regime = "BEAR_TREND"
+        regime_bias = "BEARISH"
+        allowed_setups = []
+        tradeable = False
+
+    reason = " | ".join(blocked) if blocked else f"Macro conditions clear ({macro_regime}) — longs allowed"
 
     state = MacroState(
         tradeable=tradeable,
@@ -216,12 +248,16 @@ def get_macro_state(
         breadth_ok=(breadth_pct >= breadth_threshold),
         blocked_reasons=blocked,
         reason=reason,
+        macro_regime=macro_regime,
+        regime_bias=regime_bias,
+        allowed_setups=allowed_setups,
+        macro_score=macro_score,
     )
 
     if use_cache:
         _cache[cache_key] = (time.time(), state)
 
-    status = "✅ CLEAR" if tradeable else f"🚫 BLOCKED ({len(blocked)} gate{'s' if len(blocked)>1 else ''})"
-    print(f"  🌐 [macro] {status}: {reason}")
+    status = "CLEAR" if tradeable else f"BLOCKED ({len(blocked)} gate{'s' if len(blocked)>1 else ''})"
+    print(f"  [macro] {status} [{macro_regime}]: {reason}")
 
     return state
